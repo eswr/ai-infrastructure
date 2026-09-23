@@ -11,13 +11,19 @@ path = "src/main.rs"
 [dependencies]
 inference-lab-protocol = { workspace = true }
 inference-lab-scheduler = { workspace = true }
+inference-lab-streaming = { workspace = true }
 
 tokio = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
 axum = { workspace = true }
 futures-util = { workspace = true }
+bytes = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 prometheus = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry-appender-tracing = { workspace = true }
