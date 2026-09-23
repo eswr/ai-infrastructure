@@ -1,0 +1,41 @@
+# Worker aborts the connection mid-stream: client keeps a 200 + truncated
+# SSE body, the gateway records an upstream stream error and returns the
+# active count to zero.
+name = "midstream-crash"
+description = "truncated stream on worker abort; outcome=upstream_error; capacity released"
+
+[worker]
+CRASH_STREAM_PCT = 100
+TTFT_MS = 50
+
+[gateway]
+HEALTH_INTERVAL_S = 5
+
+[[steps]]
+kind = "chat"
+stream = true
+max_tokens = 16
+
+[[asserts]]
+kind = "status"
+equals = 200
+
+[[asserts]]
+kind = "tokens_le"
+value = 15
+
+[[asserts]]
+kind = "metric_value"
+metric = 'worker_errors_total{reason="stream",worker="mock"}'
+op = "ge"
+value = 1
+
+[[asserts]]
+kind = "metric_value"
+metric = 'inference_requests_total{outcome="upstream_error"}'
+op = "ge"
+value = 1
+
+[[asserts]]
+kind = "active_le"
+value = 0

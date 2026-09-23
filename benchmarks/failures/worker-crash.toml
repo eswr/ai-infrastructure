@@ -1,0 +1,61 @@
+# Worker returns 5xx, then comes back. Acceptance:
+#   - client sees 502 (upstream_http_error), not a hang
+#   - worker_errors_total{reason="http"} increments
+#   - after the worker process disappears long enough for 3 failed health
+#     probes, the worker is marked unhealthy; a healthy probe restores it
+name = "worker-crash"
+description = "worker 5xx -> 502 to client; health flip on outage; recovery after restart"
+
+[worker]
+FAIL_AFTER_REQUESTS = 2
+TTFT_MS = 20
+
+[gateway]
+HEALTH_INTERVAL_S = 1
+
+[[steps]]
+kind = "chat"
+count = 2
+stream = false
+max_tokens = 4
+
+[[steps]]
+kind = "chat"
+stream = false
+max_tokens = 4
+expect_status = 502
+
+[[steps]]
+kind = "restart_worker"
+down_s = 4.0
+
+[[steps]]
+kind = "chat"
+stream = false
+max_tokens = 4
+
+[[asserts]]
+kind = "status"
+equals = 200
+
+[[asserts]]
+kind = "metric_value"
+metric = 'worker_errors_total{reason="http",worker="mock"}'
+op = "ge"
+value = 1
+
+[[asserts]]
+kind = "metric_value"
+metric = 'inference_requests_total{outcome="upstream_http_error"}'
+op = "ge"
+value = 1
+
+[[asserts]]
+kind = "poll_status_path"
+path = "workers.0.healthy"
+equals = true
+timeout_s = 15
+
+[[asserts]]
+kind = "active_le"
+value = 0

@@ -1,0 +1,40 @@
+# Worker never produces a first token (30 s hang); the gateway's
+# first-token watchdog must abort the stream, count the failure and free
+# the slot instead of holding it for the full client timeout.
+name = "first-token-timeout"
+description = "TTFT watchdog aborts a hung stream and releases capacity"
+
+[worker]
+HANG_TTFT_PCT = 100
+
+[gateway]
+FIRST_TOKEN_TIMEOUT_S = 2
+HEALTH_INTERVAL_S = 5
+
+[[steps]]
+kind = "chat"
+stream = true
+max_tokens = 8
+timeout_s = 20
+
+[[asserts]]
+kind = "status"
+equals = 200
+
+[[asserts]]
+kind = "tokens_eq"
+value = 0
+
+[[asserts]]
+kind = "max_elapsed_s"
+value = 10
+
+[[asserts]]
+kind = "metric_value"
+metric = 'worker_errors_total{reason="first_token_timeout",worker="mock"}'
+op = "ge"
+value = 1
+
+[[asserts]]
+kind = "active_le"
+value = 0

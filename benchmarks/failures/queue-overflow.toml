@@ -1,0 +1,38 @@
+# Overload gate: input budget admits exactly one 128-word request; the
+# next arrival queues; everyone after that gets 429 + Retry-After.
+name = "queue-overflow"
+description = "bounded queue with 429 + Retry-After at the overload threshold"
+
+[worker]
+TTFT_MS = 100
+TOK_INTERVAL_MS = 25
+
+[gateway]
+ADMIT_MAX_ACTIVE_INPUT_TOKENS = 100
+ADMIT_DEGRADED_QUEUE_S = 0.5
+ADMIT_OVERLOADED_QUEUE_S = 1
+HEALTH_INTERVAL_S = 5
+
+[[steps]]
+kind = "chat"
+count = 5
+stream = false
+max_tokens = 16
+prompt_words = 128
+
+[[asserts]]
+kind = "status_set"
+contains = [429, 200]
+
+[[asserts]]
+kind = "has_retry_after"
+
+[[asserts]]
+kind = "metric_value"
+metric = 'inference_admission_rejections_total{reason="overloaded"}'
+op = "ge"
+value = 1
+
+[[asserts]]
+kind = "active_le"
+value = 1

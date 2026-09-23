@@ -1,0 +1,43 @@
+# Degraded-but-alive worker: streaming completes with measurable inter-
+# token latency, proving ITL observation end-to-end.
+name = "slow-stream"
+description = "slow decode completes OK; ITL histogram populated"
+
+[worker]
+TTFT_MS = 100
+TOK_INTERVAL_MS = 250
+
+[gateway]
+HEALTH_INTERVAL_S = 5
+
+[[steps]]
+kind = "chat"
+stream = true
+max_tokens = 8
+
+[[asserts]]
+kind = "status"
+equals = 200
+
+# 8 content frames + the finish frame
+[[asserts]]
+kind = "tokens_eq"
+value = 9
+
+[[asserts]]
+kind = "min_elapsed_s"
+value = 1.5
+
+[[asserts]]
+kind = "max_elapsed_s"
+value = 15
+
+[[asserts]]
+kind = "metric_value"
+metric = "inference_itl_seconds_count"
+op = "ge"
+value = 1
+
+[[asserts]]
+kind = "active_le"
+value = 0

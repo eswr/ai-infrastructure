@@ -2,7 +2,7 @@ SHELL := /bin/bash
 SCENARIO ?= smoke
 MATRIX ?= mlx-prompt-concurrency
 
-.PHONY: build test fmt clippy bench matrix analyze \
+.PHONY: build test fmt clippy bench matrix analyze failcheck \
         worker-mlx worker-llama worker-vllm worker-mock gateway \
         up down obs-logs k8s
 
@@ -50,6 +50,9 @@ analyze:          ## tables + charts for make analyze STUDY=<results dir name>
 
 smoke:           ## start the cached 9B-4bit MLX model on :8082 (loads in seconds)
 	bash workers/mlx-lm/run.sh
+
+failcheck: build  ## automated failure-injection suite against the mock worker
+	python3 benchmarks/failures/run_suite.py
 
 # -------------------------------------------------------- observability --
 

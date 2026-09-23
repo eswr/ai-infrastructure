@@ -1,0 +1,48 @@
+# Cancellation. Active stream: client closes mid-generation -> gateway
+# aborts upstream, counts the cancel and books the saved estimated
+# compute. Queued victim: best-effort on HTTP/1.1 (the disconnect is only
+# observable at response-write time), so its outcome is reported, not
+# asserted.
+name = "client-cancel"
+description = "active-stream cancel aborts upstream and frees capacity; queued cancel reported"
+
+[worker]
+TTFT_MS = 100
+TOK_INTERVAL_MS = 100
+
+[gateway]
+ADMIT_MAX_ACTIVE_INPUT_TOKENS = 100
+ADMIT_MAX_ACTIVE_OUTPUT_TOKENS = 100000
+HEALTH_INTERVAL_S = 5
+
+[[steps]]
+kind = "cancel_active"
+read_chunks = 3
+max_tokens = 64
+prompt_words = 128
+
+[[steps]]
+kind = "cancel_queued"
+filler_tokens = 64
+queued_for_s = 1.0
+prompt_words = 128
+
+[[steps]]
+kind = "sleep"
+seconds = 1
+
+[[asserts]]
+kind = "metric_value"
+metric = 'inference_stream_cancelled_total{phase="active"}'
+op = "ge"
+value = 1
+
+[[asserts]]
+kind = "metric_value"
+metric = "inference_saved_estimated_compute_seconds"
+op = "ge"
+value = 0.001
+
+[[asserts]]
+kind = "active_le"
+value = 0
