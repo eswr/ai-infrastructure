@@ -1,104 +1,77 @@
-//! gateway — OpenAI-compatible edge in front of the lab's inference workers.
+//! gateway — OpenAI-compatible inference edge in front of the lab's workers.
 //!
-//! Responsibilities:
-//! * terminate client SSE, proxy to a worker chosen by the routing policy
-//! * keep per-worker outstanding-request counts accurate even when a client
-//!   disconnects mid-stream (dropping the body stream drops the upstream
-//!   reqwest stream → connection aborted → worker stops generating)
-//! * expose Prometheus metrics on /metrics
+//! Request path (phase 3):
+//!
+//! ```text
+//! request → estimate tokens → admission control (budget by estimated work;
+//!           queue with token/seconds accounting, or 429 + Retry-After when
+//!           overloaded) → scheduler (LOR / adaptive ECT / prefix affinity,
+//!           health-aware, re-route on connect failure) → worker →
+//!           instrumented stream (TTFT decomposition, ITL, token counts,
+//!           OTel spans) → client
+//! ```
+//!
+//! Every request leaves: a distributed trace (OTLP → collector → Tempo),
+//! Prometheus metrics (`/metrics`), and log lines correlated by trace id
+//! (OTLP → Loki). Client disconnects cancel upstream generation and release
+//! admission capacity immediately — including requests still in the queue
+//! (via HTTP/2 stream reset; on HTTP/1.1 a queued-request disconnect is
+//! only observable once the response is written).
 //!
 //! Config (env):
-//! * `GATEWAY_ADDR`       listen address           (default 0.0.0.0:8080)
-//! * `WORKERS`            `name=url[,name=url...]` (default mlx=http://127.0.0.1:8082)
+//! * `GATEWAY_ADDR`       listen address            (default 0.0.0.0:8080)
+//! * `WORKERS` — `name=url[,name=url...]`, optional `#model` suffix
+//!   (default mlx=http://127.0.0.1:8082)
 //! * `ROUTE_POLICY`       lor | ect | prefix-affinity (default lor)
+//! * `ADMIT_MAX_ACTIVE_INPUT_TOKENS`  prefill budget, 0 = off (default 0)
+//! * `ADMIT_MAX_ACTIVE_OUTPUT_TOKENS` decode budget, 0 = off (default 0)
+//! * `ADMIT_MAX_WORK_MS`  per-request estimated-work cap, 0 = off
+//! * `ADMIT_DEGRADED_QUEUE_S` / `ADMIT_OVERLOADED_QUEUE_S` (5 / 30)
+//! * `FIRST_TOKEN_TIMEOUT_S` abort streams with no first token (0 = off)
+//! * `HEALTH_INTERVAL_S`  worker /health probe interval (default 5)
+//! * `PROFILE_FIXED_MS` / `PROFILE_PREFILL_MS_PER_TOK` /
+//!   `PROFILE_DECODE_MS_PER_TOK`  service-model seeds (phase-2 defaults:
+//!   750 / 5.35 / 76)
+//! * `OTEL_EXPORTER_OTLP_ENDPOINT`  enables OTLP export (e.g. http://127.0.0.1:4318)
 
+mod admission;
+mod metrics;
+mod proxy;
+mod telemetry;
+
+use admission::{
+    AdmissionController, AdmissionDecision, AdmissionPolicy, RequestSize, TokenEstimator,
+};
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures_util::{Stream, StreamExt};
 use inference_lab_protocol::ChatCompletionRequest;
 use inference_lab_scheduler::{
-    RequestShape, RoutingPolicy, Router as WorkerRouter, SelectOutcome, WorkerHandle,
+    RequestShape, Router as WorkerRouter, SelectOutcome, ServiceDefaults, WorkerHandle,
 };
-use prometheus::{Encoder, IntCounter, IntCounterVec, IntGauge, Registry, TextEncoder};
+use metrics::Metrics;
+use opentelemetry::trace::{SpanKind, TraceContextExt};
+use opentelemetry::KeyValue;
+use proxy::{InFlightGuard, InstrumentedStream, RequestTimeline, StreamCtx, TraceSpans};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
-use std::pin::Pin;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::task::{Context as TaskContext, Poll};
+use std::time::{Duration, Instant};
 
-#[derive(Clone)]
 struct AppState {
     router: Arc<WorkerRouter>,
     client: reqwest::Client,
     metrics: Arc<Metrics>,
-}
-
-struct Metrics {
-    registry: Registry,
-    requests_total: IntCounter,
-    upstream_failures: IntCounterVec,
-    active_requests: IntGauge,
-}
-
-impl Metrics {
-    fn new() -> anyhow::Result<Self> {
-        let registry = Registry::new();
-        let requests_total =
-            IntCounter::new("gateway_requests_total", "Chat completion requests received")?;
-        let upstream_failures = IntCounterVec::new(
-            prometheus::Opts::new(
-                "gateway_upstream_failures_total",
-                "Upstream request failures",
-            ),
-            &["worker", "reason"],
-        )?;
-        let active_requests =
-            IntGauge::new("gateway_active_requests", "Requests currently streaming/proxying")?;
-        registry.register(Box::new(requests_total.clone()))?;
-        registry.register(Box::new(upstream_failures.clone()))?;
-        registry.register(Box::new(active_requests.clone()))?;
-        Ok(Self { registry, requests_total, upstream_failures, active_requests })
-    }
-}
-
-/// Stream wrapper that runs a cleanup closure when the body is dropped —
-/// whether that's normal completion, an upstream error, or a client
-/// disconnect. This is what keeps outstanding counts honest and what turns
-/// "browser closed the tab" into "abort the upstream request".
-struct OnDropStream<S, F: FnOnce()> {
-    inner: S,
-    cleanup: Option<F>,
-}
-
-impl<S, F> Stream for OnDropStream<S, F>
-where
-    S: Stream + Unpin,
-    F: FnOnce() + Unpin,
-{
-    type Item = S::Item;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        self.inner.poll_next_unpin(cx)
-    }
-}
-
-impl<S, F: FnOnce()> Drop for OnDropStream<S, F> {
-    fn drop(&mut self) {
-        if let Some(cleanup) = self.cleanup.take() {
-            cleanup();
-        }
-    }
+    admission: Arc<AdmissionController>,
+    estimator: Arc<TokenEstimator>,
+    first_token_timeout: Option<Duration>,
 }
 
 fn error_json(status: StatusCode, msg: &str) -> Response {
-    let body = serde_json::json!({
-        "error": {"message": msg, "type": "gateway_error"}
-    });
+    let body = serde_json::json!({"error": {"message": msg, "type": "gateway_error"}});
     (status, Json(body)).into_response()
 }
 
@@ -112,97 +85,343 @@ fn prefix_hash(req: &ChatCompletionRequest) -> u64 {
     h.finish()
 }
 
+/// Best-case (fastest healthy worker) estimated service time, used by
+/// admission for work accounting.
+fn est_work_ms(st: &AppState, est_in: u64, out_tok: u64) -> f64 {
+    let healthy = st.router.healthy_workers();
+    let candidates: &[Arc<WorkerHandle>] = if healthy.is_empty() {
+        st.router.workers()
+    } else {
+        &healthy
+    };
+    candidates
+        .iter()
+        .map(|w| w.service_time_ms(est_in, out_tok, false))
+        .fold(f64::INFINITY, f64::min)
+}
+
+// ---------------------------------------------------------------------------
+// Chat completions: the full path
+// ---------------------------------------------------------------------------
+
+/// Ends queued-request bookkeeping when the handler future is dropped
+/// (client disconnect) — the entry leaves the queue and the estimated work
+/// it held is reported as saved.
+struct QueuedGuard {
+    ctrl: Arc<AdmissionController>,
+    metrics: Arc<Metrics>,
+    entry: Arc<admission::Queued>,
+}
+
+impl Drop for QueuedGuard {
+    fn drop(&mut self) {
+        let saved = self.ctrl.cancel_queued(&self.entry);
+        if saved > 0.0 {
+            self.metrics.stream_cancelled_total.with_label_values(&["queued"]).inc();
+            self.metrics.requests_total.with_label_values(&["queued_cancelled"]).inc();
+            self.metrics.saved_compute_seconds.inc_by(saved / 1000.0);
+        }
+    }
+}
+
 async fn chat_completions(
     State(st): State<Arc<AppState>>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Response {
-    st.metrics.requests_total.inc();
-    st.metrics.active_requests.inc();
+    st.metrics.requests_in_flight.inc();
+    let in_flight = InFlightGuard(st.metrics.clone());
 
+    let stream_mode = req.stream;
+    let model = req.model.clone();
+    let est_in = st.estimator.estimate(&req);
+    let out_tok = req.max_tokens as u64;
     let hash = prefix_hash(&req);
-    let est_input: u64 = req
-        .messages
-        .iter()
-        .map(|m| m.content.split_whitespace().count() as u64 * 3 / 4)
-        .sum::<u64>()
-        .max(1);
-    let worker = match st.router.select(RequestShape {
-        prefix_hash: hash,
-        input_tokens: est_input,
-        output_tokens: req.max_tokens as u64,
-    }) {
+
+    let root = telemetry::root_span(
+        "POST /v1/chat/completions",
+        SpanKind::Server,
+        vec![
+            KeyValue::new("gen_ai.operation.name", "chat"),
+            KeyValue::new("gen_ai.request.model", model.clone()),
+            KeyValue::new("request.input_tokens_estimated", est_in as i64),
+            KeyValue::new("request.output_tokens_requested", out_tok as i64),
+            KeyValue::new("scheduler.policy", st.router.policy().as_str()),
+            KeyValue::new("cache.prefix_hash", format!("{hash:016x}")),
+        ],
+    );
+    telemetry::instant_span(
+        &root,
+        "tokens.estimate",
+        vec![
+            KeyValue::new("request.input_tokens_estimated", est_in as i64),
+            KeyValue::new("inference.token_calib_ratio", st.estimator.ratio()),
+        ],
+    );
+
+    // ---- admission ---------------------------------------------------------
+    let size = RequestSize {
+        input_tokens: est_in,
+        output_tokens: out_tok,
+        est_work_ms: est_work_ms(&st, est_in, out_tok),
+    };
+
+    let admission_span =
+        telemetry::child_span(&root, "admission", SpanKind::Internal, vec![]);
+    let decision = st.admission.decide(size);
+    let snap = st.admission.snapshot();
+    root.span().set_attribute(KeyValue::new("scheduler.queue_depth", snap.queued_requests as i64));
+    root.span().set_attribute(KeyValue::new("scheduler.active_requests", snap.active_requests as i64));
+    root.span().set_attribute(KeyValue::new("inference.load_state", snap.load_state.as_str()));
+    admission_span.span().end();
+
+    let (permit, mut timeline) = match decision {
+        AdmissionDecision::Reject { reason, retry_after_s } => {
+            st.metrics.admission_rejections_total.with_label_values(&[reason]).inc();
+            st.metrics.requests_total.with_label_values(&["rejected"]).inc();
+            root.span().set_attribute(KeyValue::new("inference.admission.state", "rejected"));
+            root.span().set_attribute(KeyValue::new("inference.admission.reject_reason", reason));
+            root.span().end();
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, HeaderValue::from(retry_after_s))],
+                Json(serde_json::json!({
+                    "error": {"message": format!("gateway overloaded ({reason})"),
+                              "type": "gateway_admission",
+                              "retry_after_s": retry_after_s}
+                })),
+            )
+                .into_response();
+        }
+        AdmissionDecision::Admit(p) => {
+            root.span().set_attribute(KeyValue::new("inference.admission.state", "immediate"));
+            (p, RequestTimeline::new(est_in, out_tok))
+        }
+        AdmissionDecision::Queue(entry) => {
+            root.span().set_attribute(KeyValue::new("inference.admission.state", "queued"));
+            let mut tl = RequestTimeline::new(est_in, out_tok);
+            tl.queued_at = Some(Instant::now());
+            let wait_span = telemetry::child_span(
+                &root,
+                "queue.wait",
+                SpanKind::Internal,
+                vec![KeyValue::new(
+                    "inference.queue.depth_at_enqueue",
+                    AdmissionController::queue_depth_at_enqueue(&entry) as i64,
+                )],
+            );
+            let _guard = QueuedGuard {
+                ctrl: st.admission.clone(),
+                metrics: st.metrics.clone(),
+                entry: entry.clone(),
+            };
+            match st.admission.wait_for_grant(&entry).await {
+                Some(p) => {
+                    tl.granted_at = Some(Instant::now());
+                    wait_span.span().set_attribute(KeyValue::new(
+                        "inference.admission_wait_s",
+                        st.admission.queue_wait(&entry).as_secs_f64(),
+                    ));
+                    wait_span.span().end();
+                    (p, tl)
+                }
+                None => {
+                    // Defensive: the only canceller is the guard above, which
+                    // has already run its bookkeeping on drop.
+                    wait_span.span().end();
+                    root.span().set_attribute(KeyValue::new("inference.outcome", "queued_cancelled"));
+                    root.span().end();
+                    return (
+                        StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST),
+                        Json(serde_json::json!({
+                            "error": {"message": "client disconnected while queued",
+                                      "type": "gateway_admission"}
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    };
+
+    // ---- scheduling --------------------------------------------------------
+    let shape =
+        RequestShape { prefix_hash: hash, input_tokens: est_in, output_tokens: out_tok };
+    let sel_span = telemetry::child_span(&root, "scheduler.select", SpanKind::Internal, vec![]);
+    let first_choice = match st.router.select(shape) {
         SelectOutcome::Worker(w) => w,
         SelectOutcome::AllUnhealthy => {
+            sel_span.span().end();
+            st.metrics.requests_total.with_label_values(&["no_worker"]).inc();
+            root.span().set_attribute(KeyValue::new("inference.outcome", "no_worker"));
+            root.span().end();
             return error_json(StatusCode::SERVICE_UNAVAILABLE, "no healthy workers");
         }
     };
-    worker.inc_outstanding();
-    tracing::info!(worker = %worker.id, model = %req.model, stream = req.stream, "routing request");
+    sel_span.span().end();
 
-    let worker_for_err = worker.clone();
-    let metrics = st.metrics.clone();
-    let cleanup = move || {
-        worker_for_err.dec_outstanding();
-        metrics.active_requests.dec();
-    };
+    // ---- dispatch (one re-route attempt on connect failure) -----------------
+    let mut worker = first_choice;
 
-    let url = format!("{}/v1/chat/completions", worker.endpoint.trim_end_matches('/'));
-    let upstream = match st.client.post(&url).json(&req).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            st.metrics
-                .upstream_failures
-                .with_label_values(&[&worker.id, "connect"])
-                .inc();
-            cleanup();
-            return error_json(
-                StatusCode::BAD_GATEWAY,
-                &format!("upstream {}: {e}", worker.id),
-            );
+    let (resp, est_total, work_start, worker_span) = loop {
+        st.metrics
+            .scheduler_decisions_total
+            .with_label_values(&[st.router.policy().as_str(), &worker.id])
+            .inc();
+        worker.inc_outstanding();
+        timeline.dispatched_at = Some(Instant::now());
+
+        let est_total = worker.service_time_ms(est_in, out_tok, worker.has_prefix(hash));
+        let work_start = worker.begin_work(est_total);
+
+        let url = format!("{}/v1/chat/completions", worker.endpoint.trim_end_matches('/'));
+        let mut out_headers = HeaderMap::new();
+        telemetry::inject_traceparent(&root, &mut out_headers);
+
+        let worker_span = telemetry::child_span(
+            &root,
+            "worker.request",
+            SpanKind::Client,
+            vec![
+                KeyValue::new("http.request.method", "POST"),
+                KeyValue::new("server.address", worker.endpoint.clone()),
+                KeyValue::new("http.url", url.clone()),
+                KeyValue::new("inference.worker.id", worker.id.clone()),
+                KeyValue::new("inference.runtime", worker.runtime.clone()),
+                KeyValue::new("inference.estimated_work_ms", est_total),
+            ],
+        );
+        root.span().set_attribute(KeyValue::new("inference.worker.id", worker.id.clone()));
+        root.span().set_attribute(KeyValue::new("inference.runtime", worker.runtime.clone()));
+        let connect_span = telemetry::child_span(&root, "worker.connect", SpanKind::Internal, vec![]);
+
+        match st.client.post(&url).headers(out_headers).json(&req).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                connect_span.span().set_attribute(KeyValue::new(
+                    "inference.connect_ms",
+                    work_start.elapsed().as_secs_f64() * 1000.0,
+                ));
+                connect_span.span().end();
+                break (resp, est_total, work_start, worker_span);
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                st.metrics.worker_errors_total.with_label_values(&[&worker.id, "http"]).inc();
+                if status.is_server_error() && worker.record_dispatch_failure() {
+                    tracing::warn!(worker = %worker.id, "worker marked unhealthy (HTTP {status})");
+                }
+                worker.end_work(work_start, est_total);
+                worker.dec_outstanding();
+                worker_span.span().set_attribute(KeyValue::new(
+                    "inference.outcome",
+                    "upstream_http_error",
+                ));
+                worker_span.span().set_attribute(KeyValue::new(
+                    "http.response.status_code",
+                    status.as_u16() as i64,
+                ));
+                worker_span.span().end();
+                connect_span.span().end();
+                st.metrics.requests_total.with_label_values(&["upstream_http_error"]).inc();
+                root.span().set_attribute(KeyValue::new("inference.outcome", "upstream_http_error"));
+                root.span().end();
+                return error_json(
+                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                    &format!(
+                        "upstream {}: {}",
+                        worker.id,
+                        body.chars().take(300).collect::<String>()
+                    ),
+                );
+            }
+            Err(e) => {
+                st.metrics.worker_errors_total.with_label_values(&[&worker.id, "connect"]).inc();
+                if worker.record_dispatch_failure() {
+                    tracing::warn!(worker = %worker.id, "worker marked unhealthy (connect failures)");
+                }
+                worker.end_work(work_start, est_total);
+                worker.dec_outstanding();
+                worker_span.span().set_attribute(KeyValue::new("inference.outcome", "upstream_error"));
+                worker_span.span().set_attribute(KeyValue::new("inference.error", format!("{e}")));
+                worker_span.span().end();
+                connect_span.span().end();
+                // Re-route once if another healthy worker exists.
+                if let SelectOutcome::Worker(w2) = st.router.select(shape) {
+                    if w2.id != worker.id {
+                        tracing::warn!(from = %worker.id, to = %w2.id, "connect failure, re-routing");
+                        worker = w2;
+                        continue;
+                    }
+                }
+                st.metrics.requests_total.with_label_values(&["upstream_error"]).inc();
+                root.span().set_attribute(KeyValue::new("inference.outcome", "upstream_error"));
+                root.span().end();
+                return error_json(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("upstream {}: {e}", worker.id),
+                );
+            }
         }
     };
+    timeline.headers_at = Some(Instant::now());
 
-    let status = upstream.status();
-    if !status.is_success() {
-        let body = upstream.text().await.unwrap_or_default();
-        st.metrics
-            .upstream_failures
-            .with_label_values(&[&worker.id, "http"])
-            .inc();
-        cleanup();
-        return error_json(
-            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-            &format!("upstream {}: {}", worker.id, body.chars().take(300).collect::<String>()),
-        );
-    }
+    let first_token_span = telemetry::child_span(
+        &root,
+        "worker.waiting_for_first_token",
+        SpanKind::Internal,
+        vec![KeyValue::new(
+            "inference.note",
+            "runtime queue + tokenization + prefill; NOT pure prefill",
+        )],
+    );
 
-    let mut upstream_headers = HeaderMap::new();
-    if let Some(ct) = upstream.headers().get(header::CONTENT_TYPE) {
-        upstream_headers.insert(header::CONTENT_TYPE, ct.clone());
-    }
-    // SSE passthrough: bytes flow through unchanged; when the client hangs up,
-    // hyper drops this body → OnDropStream::drop fires → upstream stream is
-    // dropped too, closing the worker connection.
-    let stream = OnDropStream {
-        inner: upstream.bytes_stream(),
-        cleanup: Some(cleanup),
+    let content_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .cloned()
+        .unwrap_or(HeaderValue::from_static(if stream_mode {
+            "text/event-stream"
+        } else {
+            "application/json"
+        }));
+
+    let ctx = StreamCtx {
+        metrics: st.metrics.clone(),
+        worker: worker.clone(),
+        estimator: st.estimator.clone(),
+        _permit: permit,
+        _in_flight: in_flight,
+        timeline,
+        spans: TraceSpans {
+            root: Some(root),
+            worker_request: Some(worker_span),
+            first_token: Some(first_token_span),
+            streaming: None,
+        },
+        first_token_deadline: st.first_token_timeout.map(|t| Instant::now() + t),
+        stream_mode,
+        work_estimate: (work_start, est_total),
+        est_total_ms: est_total,
     };
 
+    let stream = InstrumentedStream::new(resp.bytes_stream(), ctx);
     match Response::builder()
-        .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK))
-        .header(header::CONTENT_TYPE, upstream_headers.get(header::CONTENT_TYPE).cloned().unwrap_or(HeaderValue::from_static("application/json")))
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
         .body(Body::from_stream(stream))
     {
-        Ok(resp) => resp,
+        Ok(r) => r,
         Err(e) => error_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("build response: {e}")),
     }
 }
 
+// ---------------------------------------------------------------------------
+// Supporting endpoints & tasks
+// ---------------------------------------------------------------------------
+
 async fn list_models(State(st): State<Arc<AppState>>) -> Response {
-    let mut seen = std::collections::BTreeSet::new();
-    for w in st.router.workers() {
-        seen.insert(w.model.clone());
-    }
+    let seen: std::collections::BTreeSet<String> =
+        st.router.workers().iter().map(|w| w.model.clone()).collect();
     let data: Vec<serde_json::Value> = seen
         .into_iter()
         .map(|m| serde_json::json!({"id": m, "object": "model"}))
@@ -214,26 +433,131 @@ async fn healthz() -> Response {
     Json(serde_json::json!({"status": "ok"})).into_response()
 }
 
+/// Rich operational snapshot for tests and humans.
+async fn status(State(st): State<Arc<AppState>>) -> Response {
+    let snap = st.admission.snapshot();
+    let workers: Vec<serde_json::Value> = st
+        .router
+        .workers()
+        .iter()
+        .map(|w| {
+            serde_json::json!({
+                "id": w.id,
+                "endpoint": w.endpoint,
+                "runtime": w.runtime,
+                "model": w.model,
+                "healthy": w.is_healthy(),
+                "outstanding": w.outstanding(),
+                "prefill_ms_per_token": w.prefill_ms_per_tok(),
+                "fixed_overhead_ms": w.fixed_overhead_ms(),
+                "decode_ms_per_token": w.decode_ms_per_tok(),
+                "remaining_work_s": w.remaining_work_ms() / 1000.0,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({
+        "admission": {
+            "enabled": snap.enabled,
+            "active_requests": snap.active_requests,
+            "active_input_tokens": snap.active_input_tokens,
+            "active_output_tokens": snap.active_output_tokens,
+            "queued_requests": snap.queued_requests,
+            "queued_input_tokens": snap.queued_input_tokens,
+            "queued_output_tokens": snap.queued_output_tokens,
+            "estimated_queue_seconds": snap.estimated_queue_seconds,
+            "load_state": snap.load_state.as_str(),
+        },
+        "policy": st.router.policy().as_str(),
+        "workers": workers,
+    }))
+    .into_response()
+}
+
 async fn metrics_endpoint(State(st): State<Arc<AppState>>) -> Response {
-    let encoder = TextEncoder::new();
-    let mut buf = Vec::new();
-    if encoder.encode(&st.metrics.registry.gather(), &mut buf).is_err() {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    match st.metrics.encode() {
+        Ok(buf) => (
+            [(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; version=0.0.4"))],
+            buf,
+        )
+            .into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
-    (
-        [(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; version=0.0.4"))],
-        buf,
-    )
-        .into_response()
 }
 
 async fn root() -> Response {
     Json(serde_json::json!({
         "service": "inference-lab gateway",
-        "endpoints": ["/v1/chat/completions", "/v1/models", "/healthz", "/metrics"],
+        "endpoints": ["/v1/chat/completions", "/v1/models", "/healthz", "/status", "/metrics"],
     }))
     .into_response()
 }
+
+/// Mirror admission + worker state into gauges every 500 ms so Prometheus
+/// (5 s scrape) always sees fresh queue/work state.
+async fn gauge_sampler(st: Arc<AppState>) {
+    let mut tick = tokio::time::interval(Duration::from_millis(500));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        let s = st.admission.snapshot();
+        let m = &st.metrics;
+        m.requests_active.set(s.active_requests as i64);
+        m.requests_queued.set(s.queued_requests as i64);
+        m.queued_input_tokens.set(s.queued_input_tokens as i64);
+        m.queued_output_tokens.set(s.queued_output_tokens as i64);
+        m.estimated_queue_seconds.set(s.estimated_queue_seconds);
+        m.load_state.set(s.load_state as i64);
+        for w in st.router.workers() {
+            let id = w.id.as_str();
+            m.workers_healthy.with_label_values(&[id]).set(w.is_healthy() as i64);
+            m.worker_outstanding.with_label_values(&[id]).set(w.outstanding() as i64);
+            m.worker_prefill_ms_per_tok
+                .with_label_values(&[id])
+                .set(w.prefill_ms_per_tok() as i64);
+            m.worker_decode_ms_per_tok
+                .with_label_values(&[id])
+                .set(w.decode_ms_per_tok() as i64);
+            m.worker_fixed_overhead_ms
+                .with_label_values(&[id])
+                .set(w.fixed_overhead_ms() as i64);
+            m.worker_remaining_work_seconds
+                .with_label_values(&[id])
+                .set((w.remaining_work_ms() / 1000.0) as i64);
+        }
+    }
+}
+
+/// Background worker health probes: /health failures count toward the same
+/// consecutive-failure threshold as dispatch failures.
+async fn health_poller(st: Arc<AppState>, interval: Duration) {
+    let mut tick = tokio::time::interval(interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        for w in st.router.workers() {
+            let url = format!("{}/health", w.endpoint.trim_end_matches('/'));
+            let ok = match st
+                .client
+                .get(&url)
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await
+            {
+                Ok(r) => r.status().is_success(),
+                Err(_) => false,
+            };
+            if ok {
+                w.record_success();
+            } else if w.record_dispatch_failure() {
+                tracing::warn!(worker = %w.id, "health probe failing — worker marked unhealthy");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Setup
+// ---------------------------------------------------------------------------
 
 fn parse_workers(spec: &str) -> Vec<(String, String, String)> {
     // spec: "name=url[,name=url...]" with optional "#model" suffix:
@@ -251,46 +575,72 @@ fn parse_workers(spec: &str) -> Vec<(String, String, String)> {
         .collect()
 }
 
+fn env_f64(key: &str, default: f64) -> f64 {
+    std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "gateway=info".into()),
-        )
-        .init();
+    let telemetry_guard = telemetry::init(env!("CARGO_PKG_VERSION"))?;
 
     let addr = std::env::var("GATEWAY_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
-    let workers_spec = std::env::var("WORKERS").unwrap_or_else(|_| "mlx=http://127.0.0.1:8082".into());
-    let policy = RoutingPolicy::parse(
+    let workers_spec =
+        std::env::var("WORKERS").unwrap_or_else(|_| "mlx=http://127.0.0.1:8082".into());
+    let policy = inference_lab_scheduler::RoutingPolicy::parse(
         &std::env::var("ROUTE_POLICY").unwrap_or_else(|_| "lor".into()),
     )
     .unwrap_or_default();
+
+    let service_defaults = ServiceDefaults {
+        fixed_ms: env_f64("PROFILE_FIXED_MS", 750.0),
+        prefill_ms_per_tok: env_f64("PROFILE_PREFILL_MS_PER_TOK", 5.35),
+        decode_ms_per_tok: env_f64("PROFILE_DECODE_MS_PER_TOK", 76.0),
+    };
 
     let handles = parse_workers(&workers_spec)
         .into_iter()
         .map(|(name, url, model)| {
             let runtime = name.split('-').next().unwrap_or("unknown").to_string();
-            Arc::new(WorkerHandle::new(name, url, model, runtime))
+            Arc::new(WorkerHandle::with_defaults(name, url, model, runtime, service_defaults))
         })
         .collect::<Vec<_>>();
 
     for w in &handles {
         tracing::info!(worker = %w.id, endpoint = %w.endpoint, model = %w.model, "registered worker");
     }
-    tracing::info!(?policy, "routing policy");
+    let admission_policy = AdmissionPolicy::from_env();
+    tracing::info!(
+        ?policy,
+        admission_enabled = admission_policy.enabled(),
+        max_active_input_tokens = admission_policy.max_active_input_tokens,
+        max_active_output_tokens = admission_policy.max_active_output_tokens,
+        max_estimated_work_ms = admission_policy.max_estimated_work_ms,
+        "routing policy + admission"
+    );
 
     let router = Arc::new(WorkerRouter::new(handles, policy)?);
-
+    let admission = AdmissionController::new(admission_policy);
+    let first_token_timeout = env_f64("FIRST_TOKEN_TIMEOUT_S", 0.0);
     let state = Arc::new(AppState {
-        router,
-        client: reqwest::Client::builder().build()?,
+        router: router.clone(),
+        client: reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .build()?,
         metrics: Arc::new(Metrics::new()?),
+        admission: admission.clone(),
+        estimator: Arc::new(TokenEstimator::new()),
+        first_token_timeout: (first_token_timeout > 0.0)
+            .then(|| Duration::from_secs_f64(first_token_timeout)),
     });
+
+    let health_interval = Duration::from_secs_f64(env_f64("HEALTH_INTERVAL_S", 5.0).max(0.5));
+    tokio::spawn(gauge_sampler(state.clone()));
+    tokio::spawn(health_poller(state.clone(), health_interval));
 
     let app = Router::new()
         .route("/", get(root))
         .route("/healthz", get(healthz))
+        .route("/status", get(status))
         .route("/metrics", get(metrics_endpoint))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
@@ -304,5 +654,7 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("shutting down");
         })
         .await?;
+
+    telemetry_guard.shutdown();
     Ok(())
 }
