@@ -1,0 +1,948 @@
+{
+  "meta": {
+    "arch": "aarch64",
+    "cooldown_s": 5.0,
+    "created": "20260923-203336",
+    "description": "prompt length x concurrency sweep, Qwen3.5-9B-4bit on mlx-lm, via gateway, out=256, burst, stream",
+    "endpoint": "http://127.0.0.1:8080",
+    "loadgen_version": "0.1.0",
+    "manifest": "benchmarks/matrices/mlx-prompt-concurrency.toml",
+    "model": "mlx-community/Qwen3.5-9B-4bit",
+    "os": "macos",
+    "study": "mlx-prompt-concurrency",
+    "total_wall_s": 4904.831934084
+  },
+  "rows": [
+    {
+      "name": "warmup",
+      "params": {
+        "arrival": "burst",
+        "concurrency": 1,
+        "endpoint": "http://127.0.0.1:8080",
+        "input_tokens": 1024,
+        "model": "mlx-community/Qwen3.5-9B-4bit",
+        "num_requests": 3,
+        "output_tokens": 32,
+        "seed": 42,
+        "shared_prefix_tokens": 0,
+        "stream": true
+      },
+      "summary": {
+        "e2e_ms": {
+          "max": 6987.094416999999,
+          "mean": 6765.726028,
+          "p50": 6892.56975,
+          "p95": 6977.641950299999,
+          "p99": 6985.2039236599985
+        },
+        "failed": 0,
+        "input_tok_s": 160.80809351734257,
+        "itl_ms": {
+          "max": 107.87658400000055,
+          "mean": 60.32397962222221,
+          "p50": 55.63683350000019,
+          "p95": 78.28131644999975,
+          "p99": 104.89415573000085
+        },
+        "output_tok_s": 4.58184825279193,
+        "output_tokens_total": 93,
+        "prompt_tokens_total": 3264,
+        "request_throughput": 0.14780155654167515,
+        "scenario": "warmup",
+        "successful": 3,
+        "total_requests": 3,
+        "tpot_ms": {
+          "max": 60.771504166666666,
+          "mean": 60.3347574111111,
+          "p50": 60.66878193333332,
+          "p95": 60.761231943333335,
+          "p99": 60.769449722000004
+        },
+        "ttft_ms": {
+          "max": 5200.174833,
+          "mean": 4955.6833056666665,
+          "p50": 5072.506292,
+          "p95": 5187.407978900001,
+          "p99": 5197.621462180001
+        },
+        "wall_time_s": 20.297485833
+      },
+      "warmup": true
+    },
+    {
+      "name": "p128-c1",
+      "params": {
+        "arrival": "burst",
+        "concurrency": 1,
+        "endpoint": "http://127.0.0.1:8080",
+        "input_tokens": 128,
+        "model": "mlx-community/Qwen3.5-9B-4bit",
+        "num_requests": 8,
+        "output_tokens": 256,
+        "seed": 42,
+        "shared_prefix_tokens": 0,
+        "stream": true
+      },
+      "summary": {
+        "e2e_ms": {
+          "max": 25718.191583,
+          "mean": 21447.766124875,
+          "p50": 21674.6917715,
+          "p95": 25322.18463705,
+          "p99": 25638.990193809997
+        },
+        "failed": 0,
+        "input_tok_s": 8.95194318026821,
+        "itl_ms": {
+          "max": 597.0544169999998,
+          "mean": 79.33834881373517,
+          "p50": 72.86299999999937,
+          "p95": 117.87339375000116,
+          "p99": 265.07153299999925
+        },
+        "output_tok_s": 11.842674832229818,
+        "output_tokens_total": 2032,
+        "prompt_tokens_total": 1536,
+        "request_throughput": 0.046624704063896925,
+        "scenario": "p128-c1",
+        "successful": 8,
+        "total_requests": 8,
+        "tpot_ms": {
+          "max": 95.11592079761904,
+          "mean": 79.34911423130578,
+          "p50": 80.47403266802309,
+          "p95": 93.30045499809664,
+          "p99": 94.75282763771456
+        },
+        "ttft_ms": {
+          "max": 1834.737625,
+          "mean": 1374.59327625,
+          "p50": 1326.182459,
+          "p95": 1804.72229595,
+          "p99": 1828.7345591899998
+        },
+        "wall_time_s": 171.5828585
+      },
+      "warmup": false
+    },
+    {
+      "name": "p128-c2",
+      "params": {
+        "arrival": "burst",
+        "concurrency": 2,
+        "endpoint": "http://127.0.0.1:8080",
+        "input_tokens": 128,
+        "model": "mlx-community/Qwen3.5-9B-4bit",
+        "num_requests": 8,
+        "output_tokens": 256,
+        "seed": 42,
+        "shared_prefix_tokens": 0,
+        "stream": true
+      },
+      "summary": {
+        "e2e_ms": {
+          "max": 38764.09425,
+          "mean": 31590.84535425,
+          "p50": 30458.7471045,
+          "p95": 38763.51845625001,
+          "p99": 38763.97909125
+        },
+        "failed": 0,
+        "input_tok_s": 12.1552673893019,
+        "itl_ms": {
+          "max": 376.37016700000186,
+          "mean": 110.86376255944757,
+          "p50": 98.9409169999999,
+          "p95": 160.81173769999947,
+          "p99": 221.00594141999946
+        },
+        "output_tok_s": 16.104146573717035,
+        "output_tokens_total": 2035,
+        "prompt_tokens_total": 1536,
+        "request_throughput": 0.06330868431928072,
+        "scenario": "p128-c2",
+        "successful": 8,
+        "total_requests": 8,
+        "tpot_ms": {
+          "max": 139.87855467588935,
+          "mean": 110.86087082017173,
+          "p50": 104.49544573907598,
+          "p95": 139.68207587633594,
+          "p99": 139.83925891597866
+        },
+        "ttft_ms": {
+          "max": 4106.971917,
+          "mean": 3499.693213625,
+          "p50": 3601.5767920000003,
+          "p95": 4105.7380501,
+          "p99": 4106.7251436199995
+        },
+        "wall_time_s": 126.364970083
+      },
+      "warmup": false
+    },
+    {
+      "name": "p128-c4",
+      "params": {
+        "arrival": "burst",
+        "concurrency": 4,
+        "endpoint": "http://127.0.0.1:8080",
+        "input_tokens": 128,
+        "model": "mlx-community/Qwen3.5-9B-4bit",
+        "num_requests": 8,
+        "output_tokens": 256,
+        "seed": 42,
+        "shared_prefix_tokens": 0,
+        "stream": true
+      },
+      "summary": {
+        "e2e_ms": {
+          "max": 44723.980458,
+          "mean": 42352.270583125,
+          "p50": 42381.704228999995,
+          "p95": 44723.94698925,
+          "p99": 44723.97376425
+        },
+        "failed": 0,
+        "input_tok_s": 18.12084680362854,
+        "itl_ms": {
+          "max": 480.47445799999696,
+          "mean": 147.3829313651186,
+          "p50": 130.51104150000174,
+          "p95": 222.22957939999995,
+          "p99": 311.6060203199979
+        },
+        "output_tok_s": 23.972370250633592,
+        "output_tokens_total": 2032,
+        "prompt_tokens_total": 1536,
+        "request_throughput": 0.09437941043556533,
+        "scenario": "p128-c4",
+        "successful": 8,
+        "total_requests": 8,
+        "tpot_ms": {
+          "max": 160.15080665217388,
+          "mean": 147.38762989871543,
+          "p50": 147.2005556640316,
+          "p95": 160.14705717964424,
+          "p99": 160.15005675766795
+        },
+        "ttft_ms": {
+          "max": 6178.594999999999,
+          "mean": 5063.20021875,
+          "p50": 5007.5947705,
+          "p95": 6111.7615227999995,
+          "p99": 6165.228304559999
+        },
+        "wall_time_s": 84.764250625
+      },
+      "warmup": false
+    },
+    {
+      "name": "p128-c8",
+      "params": {
+        "arrival": "burst",
+        "concurrency": 8,
+        "endpoint": "http://127.0.0.1:8080",
+        "input_tokens": 128,
+        "model": "mlx-community/Qwen3.5-9B-4bit",
+        "num_requests": 16,
+        "output_tokens": 256,
+        "seed": 42,
+        "shared_prefix_tokens": 0,
+        "stream": true
+      },
+      "summary": {
+        "e2e_ms": {
+          "max": 68411.996625,
+          "mean": 68275.83088114287,
+          "p50": 68223.052584,
+          "p95": 68411.83597500001,
+          "p99": 68411.96449500001
+        },
+        "failed": 9,
+        "input_tok_s": 44.903496373215894,
+        "itl_ms": {
+          "max": 515.0482089999932,
+          "mean": 236.0856173303221,
+          "p50": 240.04220799999894,
+          "p95": 267.24595800000316,
+          "p99": 304.27598329999745
+        },
+        "output_tok_s": 25.989067887883415,
+        "output_tokens_total": 1778,
+        "prompt_tokens_total": 3072,
+        "request_throughput": 0.10231916491292684,
+        "scenario": "p128-c8",
+        "successful": 7,
+        "total_requests": 16,
+        "tpot_ms": {
+          "max": 236.30247266403163,
+          "mean": 236.08660759062678,
+          "p50": 236.04638932806324,
+          "p95": 236.27361772252965,
+          "p99": 236.2967016757312
+        },
+        "ttft_ms": {
+          "max": 8694.403208000002,
+          "mean": 8545.919160714286,
+          "p50": 8438.527,
+          "p95": 8693.5996331,
+          "p99": 8694.242493020001
+        },
+        "wall_time_s": 68.413380875
+      },
+      "warmup": false
+    },
+    {
+      "name": "p1024-c1",
+      "params": {
+        "arrival": "burst",
+        "concurrency": 1,
+        "endpoint": "http://127.0.0.1:8080",
+        "input_tokens": 1024,
+        "model": "mlx-community/Qwen3.5-9B-4bit",
+        "num_requests": 8,
+        "output_tokens": 256,
+        "seed": 42,
+        "shared_prefix_tokens": 0,
+        "stream": true
+      },
+      "summary": {
+        "e2e_ms": {
+          "max": 32249.122792000002,
+          "mean": 26772.288291750003,
+          "p50": 26701.127249999998,
+          "p95": 31873.25284825,
+          "p99": 32173.94880325
+        },
+        "failed": 0,
+        "input_tok_s": 40.63779097126482,
+        "itl_ms": {
+          "max": 1461.1886250000025,
+          "mean": 81.78346181225302,
+          "p50": 70.88895800000137,
+          "p95": 132.3223169499977,
+          "p99": 252.72336999999922
+        },
+        "output_tok_s": 9.487131348071015,
+        "output_tokens_total": 2032,
+        "prompt_tokens_total": 8704,
+        "request_throughput": 0.03735091081917723,
+        "scenario": "p1024-c1",
+        "successful": 8,
+        "total_requests": 8,
+        "tpot_ms": {
+          "max": 96.66403294071148,
+          "mean": 81.79473882164032,
+          "p50": 83.57869927470355,
+          "p95": 95.83473278379446,
+          "p99": 96.49817290932808
+        },
+        "ttft_ms": {
+          "max": 7793.122458,
+          "mean": 6078.219369875,
+          "p50": 5808.0166255,
+          "p95": 7627.06545395,
+          "p99": 7759.91105719
+        },
+        "wall_time_s": 214.184870584
+      },
+      "warmup": false
+    },
+    {
+      "name": "p1024-c2",
+      "params": {
+        "arrival": "burst",
+        "concurrency": 2,
+        "endpoint": "http://127.0.0.1:8080",
+        "input_tokens": 1024,
+        "model": "mlx-community/Qwen3.5-9B-4bit",
+        "num_requests": 8,
+        "output_tokens": 256,
+        "seed": 42,
+        "shared_prefix_tokens": 0,
+        "stream": true
+      },
+      "summary": {
+        "e2e_ms": {
+          "max": 38390.771834,
+          "mean": 35403.777234500005,
+          "p50": 35673.8493955,
+          "p95": 38315.3915171,
+          "p99": 38375.69577062
+        },
+        "failed": 0,
+        "input_tok_s": 61.41246779724951,
+        "itl_ms": {
+          "max": 536.8937499999956,
+          "mean": 94.03551946469153,
+          "p50": 86.53341600000203,
+          "p95": 149.16392500000146,
+          "p99": 251.90555200000014
+        },
+        "output_tok_s": 14.344157517441205,
+        "output_tokens_total": 2033,
+        "prompt_tokens_total": 8704,
+        "request_throughput": 0.05644528290188374,
+        "scenario": "p1024-c2",
+        "successful": 8,
+        "total_requests": 8,
+        "tpot_ms": {
+          "max": 103.03032923228346,
+          "mean": 94.04287732794847,
+          "p50": 95.61612261067195,
+          "p95": 102.86786086363247,
+          "p99": 102.99783555855326
+        },
+        "ttft_ms": {
+          "max": 12230.906167000001,
+          "mean": 11598.050479375,
+          "p50": 11714.505459,
+          "p95": 12229.247677300002,
+          "p99": 12230.57446906
+        },
+        "wall_time_s": 141.730178125
+      },
+      "warmup": false
+    },
+    {
+      "name": "p1024-c4",
+      "params": {
+        "arrival": "burst",
+        "concurrency": 4,
+        "endpoint": "http://127.0.0.1:8080",
+        "input_tokens": 1024,
+        "model": "mlx-community/Qwen3.5-9B-4bit",
+        "num_requests": 8,
+        "output_tokens": 256,
+        "seed": 42,
+        "shared_prefix_tokens": 0,
+        "stream": true
+      },
+      "summary": {
+        "e2e_ms": {
+          "max": 64992.610166000006,
+          "mean": 63160.938848750004,
+          "p50": 63206.263978999996,
+          "p95": 64989.27589135,
+          "p99": 64991.943311070005
+        },
+        "failed": 0,
+        "input_tok_s": 68.85263176950149,
+        "itl_ms": {
+          "max": 322.3196670000034,
+          "mean": 144.18214307361637,
+          "p50": 141.1646664999971,
+          "p95": 167.42894644999936,
+          "p99": 273.97637833999937
+        },
+        "output_tok_s": 16.07405190207112,
+        "output_tokens_total": 2032,
+        "prompt_tokens_total": 8704,
+        "request_throughput": 0.0632836689057918,
+        "scenario": "p1024-c4",
+        "successful": 8,
+        "total_requests": 8,
+        "tpot_ms": {
+          "max": 145.06292901581028,
+          "mean": 144.18739194169962,
+          "p50": 144.19160251778658,
+          "p95": 145.05905619110672,
+          "p99": 145.06215445086957
+        },
+        "ttft_ms": {
+          "max": 28631.82475,
+          "mean": 26681.5286875,
+          "p50": 26781.094938000002,
+          "p95": 28629.78845,
+          "p99": 28631.41749
+        },
+        "wall_time_s": 126.414920916
+      },
+      "warmup": false
+    },
+    {
+      "name": "p1024-c8",
+      "params": {
+        "arrival": "burst",
+        "concurrency": 8,
+        "endpoint": "http://127.0.0.1:8080",
+        "input_tokens": 1024,
+        "model": "mlx-community/Qwen3.5-9B-4bit",
+        "num_requests": 16,
+        "output_tokens": 256,
+        "seed": 42,
+        "shared_prefix_tokens": 0,
+        "stream": true
+      },
+      "summary": {
+        "e2e_ms": {
+          "max": 135558.869166,
+          "mean": 121439.60955533333,
+          "p50": 135420.244375,
+          "p95": 135557.61573279998,
+          "p99": 135558.61847935998
+        },
+        "failed": 7,
+        "input_tok_s": 110.00840740428998,
+        "itl_ms": {
+          "max": 6957.035208000001,
+          "mean": 272.739772471673,
+          "p50": 271.01512500000536,
+          "p95": 361.34362519999695,
+          "p99": 612.2930031599807
+        },
+        "output_tok_s": 14.44618677195582,
+        "output_tokens_total": 2286,
+        "prompt_tokens_total": 17408,
+        "request_throughput": 0.0568747510706922,
+        "scenario": "p1024-c8",
+        "successful": 9,
+        "total_requests": 16,
+        "tpot_ms": {
+          "max": 304.7619528972332,
+          "mean": 272.763651496267,
+          "p50": 304.2201403162055,
+          "p95": 304.75990922134383,
+          "p99": 304.7615441620553
+        },
+        "ttft_ms": {
+          "max": 58455.387708,
+          "mean": 52430.40572677778,
+          "p50": 58450.9615,
+          "p95": 58454.6356916,
+          "p99": 58455.23730472
+        },
+        "wall_time_s": 158.242450834
+      },
+      "warmup": false
+    },
+    {
+      "name": "p4096-c1",
+      "params": {
+        "arrival": "burst",
+        "concurrency": 1,
+        "endpoint": "http://127.0.0.1:8080",
+        "input_tokens": 4096,
+        "model": "mlx-community/Qwen3.5-9B-4bit",
+        "num_requests": 8,
+        "output_tokens": 256,
+        "seed": 42,
+        "shared_prefix_tokens": 0,
+        "stream": true
+      },
+      "summary": {
+        "e2e_ms": {
+          "max": 51890.483875,
+          "mean": 44785.46556237499,
+          "p50": 44108.0929375,
+          "p95": 50232.77021249999,
+          "p99": 51558.9411425
+        },
+        "failed": 0,
+        "input_tok_s": 92.88476551390613,
+        "itl_ms": {
+          "max": 678.5357499999955,
+          "mean": 88.2706918023714,
+          "p50": 80.71849999999904,
+          "p95": 144.4807794500021,
+          "p99": 269.5601728400027
+        },
+        "output_tok_s": 5.67132943282023,
+        "output_tokens_total": 2032,
+        "prompt_tokens_total": 33280,
+        "request_throughput": 0.022328068633150514,
+        "scenario": "p4096-c1",
+        "successful": 8,
+        "total_requests": 8,
+        "tpot_ms": {
+          "max": 113.2145054347826,
+          "mean": 88.27530288586956,
+          "p50": 87.16888661067193,
+          "p95": 105.02089366719365,
+          "p99": 111.5757830812648
+        },
+        "ttft_ms": {
+          "max": 24864.002249999998,
+          "mean": 22451.81393225,
+          "p50": 22316.2015415,
+          "p95": 24298.1263625,
+          "p99": 24750.8270725
+        },
+        "wall_time_s": 358.29341675
+      },
+      "warmup": false
+    },
+    {
+      "name": "p4096-c2",
+      "params": {
+        "arrival": "burst",
+        "concurrency": 2,
+        "endpoint": "http://127.0.0.1:8080",
+        "input_tokens": 4096,
+        "model": "mlx-community/Qwen3.5-9B-4bit",
+        "num_requests": 8,
+        "output_tokens": 256,
+        "seed": 42,
+        "shared_prefix_tokens": 0,
+        "stream": true
+      },
+      "summary": {
+        "e2e_ms": {
+          "max": 89829.12654099999,
+          "mean": 82740.516150875,
+          "p50": 83969.13797899999,
+          "p95": 89825.3513101,
+          "p99": 89828.37149481999
+        },
+        "failed": 0,
+        "input_tok_s": 100.55423285731739,
+        "itl_ms": {
+          "max": 403.6142499999987,
+          "mean": 120.37972924901173,
+          "p50": 111.27768749999814,
+          "p95": 166.26522680000124,
+          "p99": 240.72296782000086
+        },
+        "output_tok_s": 6.139609410038129,
+        "output_tokens_total": 2032,
+        "prompt_tokens_total": 33280,
+        "request_throughput": 0.024171690590701296,
+        "scenario": "p4096-c2",
+        "successful": 8,
+        "total_requests": 8,
+        "tpot_ms": {
+          "max": 143.93156735573126,
+          "mean": 120.40771088537548,
+          "p50": 117.95253804347826,
+          "p95": 143.93143720138343,
+          "p99": 143.93154132486168
+        },
+        "ttft_ms": {
+          "max": 57180.443833,
+          "mean": 52277.365296874996,
+          "p50": 52886.7869165,
+          "p95": 57179.001031149994,
+          "p99": 57180.15527263
+        },
+        "wall_time_s": 330.965679458
+      },
+      "warmup": false
+    },
+    {
+      "name": "p4096-c4",
+      "params": {
+        "arrival": "burst",
+        "concurrency": 4,
+        "endpoint": "http://127.0.0.1:8080",
+        "input_tokens": 4096,
+        "model": "mlx-community/Qwen3.5-9B-4bit",
+        "num_requests": 8,
+        "output_tokens": 256,
+        "seed": 42,
+        "shared_prefix_tokens": 0,
+        "stream": true
+      },
+      "summary": {
+        "e2e_ms": {
+          "max": 118124.32087499999,
+          "mean": 116213.549484375,
+          "p50": 116032.70225,
+          "p95": 117958.20531875,
+          "p99": 118091.09776374999
+        },
+        "failed": 0,
+        "input_tok_s": 142.98175651226492,
+        "itl_ms": {
+          "max": 491.03591599999345,
+          "mean": 177.58967683695653,
+          "p50": 158.53427050000028,
+          "p95": 258.2000251000027,
+          "p99": 349.7751254099867
+        },
+        "output_tok_s": 8.730136094739253,
+        "output_tokens_total": 2032,
+        "prompt_tokens_total": 33280,
+        "request_throughput": 0.03437061454621753,
+        "scenario": "p4096-c4",
+        "successful": 8,
+        "total_requests": 8,
+        "tpot_ms": {
+          "max": 207.12027124505929,
+          "mean": 177.6038648305336,
+          "p50": 177.2926949110672,
+          "p95": 207.11887723932804,
+          "p99": 207.11999244391305
+        },
+        "ttft_ms": {
+          "max": 77503.58625,
+          "mean": 71279.77168225,
+          "p50": 71399.701854,
+          "p95": 77501.55008125,
+          "p99": 77503.17901624998
+        },
+        "wall_time_s": 232.756967125
+      },
+      "warmup": false
+    },
+    {
+      "name": "p4096-c8",
+      "params": {
+        "arrival": "burst",
+        "concurrency": 8,
+        "endpoint": "http://127.0.0.1:8080",
+        "input_tokens": 4096,
+        "model": "mlx-community/Qwen3.5-9B-4bit",
+        "num_requests": 16,
+        "output_tokens": 256,
+        "seed": 42,
+        "shared_prefix_tokens": 0,
+        "stream": true
+      },
+      "summary": {
+        "e2e_ms": {
+          "max": 368599.825375,
+          "mean": 368287.9473056667,
+          "p50": 368184.484271,
+          "p95": 368597.54172925,
+          "p99": 368599.36864585
+        },
+        "failed": 10,
+        "input_tok_s": 180.57337683312744,
+        "itl_ms": {
+          "max": 1255.7189999999828,
+          "mean": 244.7625358748353,
+          "p50": 219.05495799993514,
+          "p95": 427.2010375000069,
+          "p99": 678.432097750023
+        },
+        "output_tok_s": 4.134522630614276,
+        "output_tokens_total": 1524,
+        "prompt_tokens_total": 66560,
+        "request_throughput": 0.01627764815202471,
+        "scenario": "p4096-c8",
+        "successful": 6,
+        "total_requests": 16,
+        "tpot_ms": {
+          "max": 245.1149794150198,
+          "mean": 244.80438839591577,
+          "p50": 244.76539163438744,
+          "p95": 245.0814228853755,
+          "p99": 245.10826810909094
+        },
+        "ttft_ms": {
+          "max": 306687.520708,
+          "mean": 306352.4370415,
+          "p50": 306187.72866649996,
+          "p95": 306685.53289575,
+          "p99": 306687.12314554997
+        },
+        "wall_time_s": 368.603617916
+      },
+      "warmup": false
+    },
+    {
+      "name": "p8192-c1",
+      "params": {
+        "arrival": "burst",
+        "concurrency": 1,
+        "endpoint": "http://127.0.0.1:8080",
+        "input_tokens": 8192,
+        "model": "mlx-community/Qwen3.5-9B-4bit",
+        "num_requests": 8,
+        "output_tokens": 256,
+        "seed": 42,
+        "shared_prefix_tokens": 0,
+        "stream": true
+      },
+      "summary": {
+        "e2e_ms": {
+          "max": 77795.26983300001,
+          "mean": 64463.93286962501,
+          "p50": 64909.495333,
+          "p95": 75292.48194330001,
+          "p99": 77294.71225506
+        },
+        "failed": 0,
+        "input_tok_s": 128.07007245825127,
+        "itl_ms": {
+          "max": 445.33604200000264,
+          "mean": 77.10121201728394,
+          "p50": 73.69774999999208,
+          "p95": 99.99957500000019,
+          "p99": 152.14257000000066
+        },
+        "output_tok_s": 3.9420793560384086,
+        "output_tokens_total": 2033,
+        "prompt_tokens_total": 66048,
+        "request_throughput": 0.015512363427598264,
+        "scenario": "p8192-c1",
+        "successful": 8,
+        "total_requests": 8,
+        "tpot_ms": {
+          "max": 88.49702042292489,
+          "mean": 77.12370005367092,
+          "p50": 76.56640915737137,
+          "p95": 87.29662677173914,
+          "p99": 88.25694169268775
+        },
+        "ttft_ms": {
+          "max": 56273.236791,
+          "mean": 44941.751838375,
+          "p50": 44591.784083,
+          "p95": 54211.5204182,
+          "p99": 55860.89351644
+        },
+        "wall_time_s": 515.717674959
+      },
+      "warmup": false
+    },
+    {
+      "name": "p8192-c2",
+      "params": {
+        "arrival": "burst",
+        "concurrency": 2,
+        "endpoint": "http://127.0.0.1:8080",
+        "input_tokens": 8192,
+        "model": "mlx-community/Qwen3.5-9B-4bit",
+        "num_requests": 8,
+        "output_tokens": 256,
+        "seed": 42,
+        "shared_prefix_tokens": 0,
+        "stream": true
+      },
+      "summary": {
+        "e2e_ms": {
+          "max": 103142.677542,
+          "mean": 91061.8571095,
+          "p50": 93289.520583,
+          "p95": 103142.62072510002,
+          "p99": 103142.66617862001
+        },
+        "failed": 0,
+        "input_tok_s": 181.3258791496974,
+        "itl_ms": {
+          "max": 237.4299170000013,
+          "mean": 75.04258218163885,
+          "p50": 72.01606249999895,
+          "p95": 96.86571824999191,
+          "p99": 133.36211425000147
+        },
+        "output_tok_s": 5.58407276814566,
+        "output_tokens_total": 2034,
+        "prompt_tokens_total": 66048,
+        "request_throughput": 0.02196292140863583,
+        "scenario": "p8192-c2",
+        "successful": 8,
+        "total_requests": 8,
+        "tpot_ms": {
+          "max": 81.08703409090916,
+          "mean": 75.0540643783655,
+          "p50": 74.5285330217391,
+          "p95": 81.08509750494078,
+          "p99": 81.08664677371549
+        },
+        "ttft_ms": {
+          "max": 82783.240917,
+          "mean": 72055.73021875,
+          "p50": 74357.373062,
+          "p95": 82782.56184385001,
+          "p99": 82783.10510237
+        },
+        "wall_time_s": 364.250267583
+      },
+      "warmup": false
+    },
+    {
+      "name": "p8192-c4",
+      "params": {
+        "arrival": "burst",
+        "concurrency": 4,
+        "endpoint": "http://127.0.0.1:8080",
+        "input_tokens": 8192,
+        "model": "mlx-community/Qwen3.5-9B-4bit",
+        "num_requests": 8,
+        "output_tokens": 256,
+        "seed": 42,
+        "shared_prefix_tokens": 0,
+        "stream": true
+      },
+      "summary": {
+        "e2e_ms": {
+          "max": 418451.646458,
+          "mean": 320152.023364625,
+          "p50": 320597.8160835,
+          "p95": 405899.5920977,
+          "p99": 415941.23558594
+        },
+        "failed": 0,
+        "input_tok_s": 102.89640232277948,
+        "itl_ms": {
+          "max": 71249.35862499994,
+          "mean": 532.2958406620553,
+          "p50": 155.636333500006,
+          "p95": 278.42724104999303,
+          "p99": 10388.563942159955
+        },
+        "output_tok_s": 3.165659664484737,
+        "output_tokens_total": 2032,
+        "prompt_tokens_total": 66048,
+        "request_throughput": 0.01246322702553046,
+        "scenario": "p8192-c4",
+        "successful": 8,
+        "total_requests": 8,
+        "tpot_ms": {
+          "max": 881.527776019763,
+          "mean": 532.6107747653161,
+          "p50": 468.7920433952569,
+          "p95": 880.0084406616602,
+          "p99": 881.2239089481425
+        },
+        "ttft_ms": {
+          "max": 310220.129625,
+          "mean": 185401.497349,
+          "p50": 163133.1961255,
+          "p95": 278116.71737499995,
+          "p99": 303799.447175
+        },
+        "wall_time_s": 641.888331458
+      },
+      "warmup": false
+    },
+    {
+      "name": "p8192-c8",
+      "params": {
+        "arrival": "burst",
+        "concurrency": 8,
+        "endpoint": "http://127.0.0.1:8080",
+        "input_tokens": 8192,
+        "model": "mlx-community/Qwen3.5-9B-4bit",
+        "num_requests": 16,
+        "output_tokens": 256,
+        "seed": 42,
+        "shared_prefix_tokens": 0,
+        "stream": true
+      },
+      "summary": {
+        "e2e_ms": {
+          "max": 900039.534916,
+          "mean": 900034.4818053333,
+          "p50": 900035.12375,
+          "p95": 900039.5323015,
+          "p99": 900039.5343931
+        },
+        "failed": 16,
+        "input_tok_s": 146.76583042632132,
+        "output_tok_s": 0.0,
+        "output_tokens_total": 0,
+        "prompt_tokens_total": 132096,
+        "request_throughput": 0.0,
+        "scenario": "p8192-c8",
+        "successful": 0,
+        "total_requests": 16,
+        "wall_time_s": 900.046009458
+      },
+      "warmup": false
+    }
+  ]
+}

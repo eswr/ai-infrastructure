@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="780" height="470" font-family="Helvetica,Arial,sans-serif">
+<text x='62' y='16' font-size='15' font-weight='bold'>ITL p50 vs concurrency</text>
+<line x1='62.0' y1='24' x2='62.0' y2='402' stroke='#e5e7eb' stroke-width='1'/>
+<text x='62.0' y='420' font-size='11' text-anchor='middle' fill='#374151'>1</text>
+<line x1='143.1' y1='24' x2='143.1' y2='402' stroke='#e5e7eb' stroke-width='1'/>
+<text x='143.1' y='420' font-size='11' text-anchor='middle' fill='#374151'>2</text>
+<line x1='305.4' y1='24' x2='305.4' y2='402' stroke='#e5e7eb' stroke-width='1'/>
+<text x='305.4' y='420' font-size='11' text-anchor='middle' fill='#374151'>4</text>
+<line x1='630.0' y1='24' x2='630.0' y2='402' stroke='#e5e7eb' stroke-width='1'/>
+<text x='630.0' y='420' font-size='11' text-anchor='middle' fill='#374151'>8</text>
+<line x1='62' y1='309.2' x2='630' y2='309.2' stroke='#f3f4f6' stroke-width='1'/>
+<text x='54' y='313.2' font-size='11' text-anchor='end' fill='#374151'>120</text>
+<line x1='62' y1='210.1' x2='630' y2='210.1' stroke='#f3f4f6' stroke-width='1'/>
+<text x='54' y='214.1' font-size='11' text-anchor='end' fill='#374151'>180</text>
+<line x1='62' y1='111.0' x2='630' y2='111.0' stroke='#f3f4f6' stroke-width='1'/>
+<text x='54' y='115.0' font-size='11' text-anchor='end' fill='#374151'>240</text>
+<line x1='62' y1='28.5' x2='630' y2='28.5' stroke='#f3f4f6' stroke-width='1'/>
+<text x='54' y='32.5' font-size='11' text-anchor='end' fill='#374151'>290</text>
+<line x1='62' y1='402' x2='630' y2='402' stroke='#9ca3af'/>
+<line x1='62' y1='24' x2='62' y2='402' stroke='#9ca3af'/>
+<text x='346' y='464' font-size='12' text-anchor='middle' fill='#111827'>concurrency</text>
+<text x='16' y='213' font-size='12' text-anchor='middle' fill='#111827' transform='rotate(-90 16 213)'>ITL p50 (ms)</text>
+<polyline points='62.0,387.0 143.1,344.0 305.4,291.8 630.0,111.0' fill='none' stroke='#2563eb' stroke-width='2'/>
+<circle cx='62.0' cy='387.0' r='3.5' fill='#2563eb'/>
+<circle cx='143.1' cy='344.0' r='3.5' fill='#2563eb'/>
+<circle cx='305.4' cy='291.8' r='3.5' fill='#2563eb'/>
+<circle cx='630.0' cy='111.0' r='3.5' fill='#2563eb'/>
+<rect x='644' y='33' width='11' height='11' fill='#2563eb' rx='2'/>
+<text x='661' y='43' font-size='12' fill='#111827'>prompt 128</text>
+<polyline points='62.0,390.3 143.1,364.5 305.4,274.2 630.0,59.8' fill='none' stroke='#dc2626' stroke-width='2'/>
+<circle cx='62.0' cy='390.3' r='3.5' fill='#dc2626'/>
+<circle cx='143.1' cy='364.5' r='3.5' fill='#dc2626'/>
+<circle cx='305.4' cy='274.2' r='3.5' fill='#dc2626'/>
+<circle cx='630.0' cy='59.8' r='3.5' fill='#dc2626'/>
+<rect x='644' y='51' width='11' height='11' fill='#dc2626' rx='2'/>
+<text x='661' y='61' font-size='12' fill='#111827'>prompt 1024</text>
+<polyline points='62.0,374.1 143.1,323.6 305.4,245.6 630.0,145.6' fill='none' stroke='#16a34a' stroke-width='2'/>
+<circle cx='62.0' cy='374.1' r='3.5' fill='#16a34a'/>
+<circle cx='143.1' cy='323.6' r='3.5' fill='#16a34a'/>
+<circle cx='305.4' cy='245.6' r='3.5' fill='#16a34a'/>
+<circle cx='630.0' cy='145.6' r='3.5' fill='#16a34a'/>
+<rect x='644' y='69' width='11' height='11' fill='#16a34a' rx='2'/>
+<text x='661' y='79' font-size='12' fill='#111827'>prompt 4096</text>
+<polyline points='62.0,385.7 143.1,388.4 305.4,250.3' fill='none' stroke='#9333ea' stroke-width='2'/>
+<circle cx='62.0' cy='385.7' r='3.5' fill='#9333ea'/>
+<circle cx='143.1' cy='388.4' r='3.5' fill='#9333ea'/>
+<circle cx='305.4' cy='250.3' r='3.5' fill='#9333ea'/>
+<rect x='644' y='87' width='11' height='11' fill='#9333ea' rx='2'/>
+<text x='661' y='97' font-size='12' fill='#111827'>prompt 8192</text>
+</svg>
