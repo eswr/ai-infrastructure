@@ -1,3 +1,5 @@
+auth_enabled: false  # single-tenant lab; OTLP ingestion without X-Scope-OrgID
+
 server:
   http_listen_port: 3100
 

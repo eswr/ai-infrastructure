@@ -38,7 +38,7 @@ toml = "0.8"
 prometheus = "0.14"
 opentelemetry = "0.33"
 opentelemetry_sdk = "0.33"
-opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-client", "trace", "logs", "internal-logs"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "logs", "internal-logs"] }
 opentelemetry-appender-tracing = "0.33"
 
 [profile.release]
