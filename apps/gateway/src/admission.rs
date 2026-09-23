@@ -289,9 +289,16 @@ impl AdmissionController {
             };
         }
 
-        // Immediate admission only when budgets fit AND the queue is empty —
-        // otherwise a stream of small requests would barge past waiters.
-        if !self.policy.enabled() || (st.queue.is_empty() && self.policy.fits(&st, &size)) {
+        // Immediate admission when the queue is empty AND budgets fit — a
+        // busy queue is never barged past. When the machine is IDLE the
+        // budget is soft: admitting a request that overshoots it (a prompt
+        // a hair over the cap) is bounded by one max-size request and is
+        // strictly better than idling — without this, a budget sized at the
+        // workload's nominal token count deadlocks on estimator jitter.
+        // (The matching release-side rule force-grants the queue head when
+        // nothing fits and nothing is active.)
+        if !self.policy.enabled() || (st.queue.is_empty() && (self.policy.fits(&st, &size) || st.active_requests == 0))
+        {
             st.active_requests += 1;
             st.active_input_tokens += size.input_tokens;
             st.active_output_tokens += size.output_tokens;
@@ -380,10 +387,24 @@ impl AdmissionController {
                     granted.push(q.clone());
                 }
             }
-            st.active_requests += granted.len() as u64;
-            st.active_input_tokens = act_in;
-            st.active_output_tokens = act_out;
-            st.queue.retain(|q| !q.granted.load(Ordering::Acquire));
+            // Liveness rule: nothing fits and nothing is active — the queue
+            // would deadlock. Force-grant the head; overshoot is bounded by
+            // one max-size request (e.g. a prompt a hair over the budget).
+            if granted.is_empty() && st.active_requests == 0 {
+                if let Some(head) = st.queue.iter().find(|q| !q.cancelled.load(Ordering::Acquire)) {
+                    let head = head.clone();
+                    act_in += head.size.input_tokens;
+                    act_out += head.size.output_tokens;
+                    head.granted.store(true, Ordering::Release);
+                    granted.push(head);
+                }
+            }
+            if !granted.is_empty() {
+                st.active_requests += granted.len() as u64;
+                st.active_input_tokens = act_in;
+                st.active_output_tokens = act_out;
+                st.queue.retain(|q| !q.granted.load(Ordering::Acquire));
+            }
             drop(st);
             for q in granted {
                 q.notify.notify_one();
@@ -672,6 +693,34 @@ mod tests {
             permits.push(admit(&c, size(8192, 256)));
         }
         assert_eq!(c.snapshot().active_requests, 100);
+    }
+
+    #[test]
+    fn idle_machine_admits_oversize_request() {
+        // The phase-3 experiment deadlock, distilled: every request
+        // estimates a hair over the budget. An idle machine must start work
+        // (bounded overshoot) rather than queue into a deadlock.
+        let c = ctrl(8192, 1_000_000);
+        let _p = admit(&c, size(8199, 64)); // oversize: admitted while idle
+        let s = c.snapshot();
+        assert_eq!(s.active_requests, 1);
+        assert_eq!(s.active_input_tokens, 8199);
+        // Busy machine: the same request queues.
+        let _q = queue_entry(&c, size(8199, 64));
+    }
+
+    #[test]
+    fn finishing_active_grants_oversize_head() {
+        // Active finishes; the next in line doesn't fit either → release's
+        // liveness rule grants it instead of deadlocking.
+        let c = ctrl(4096, 1_000_000);
+        let permit = admit(&c, size(4096, 64));
+        let next = queue_entry(&c, size(8192, 64));
+        drop(permit);
+        assert!(next.granted.load(Ordering::Acquire), "oversize head granted on release");
+        let s = c.snapshot();
+        assert_eq!(s.active_requests, 1);
+        assert_eq!(s.queued_requests, 0);
     }
 
     #[test]
