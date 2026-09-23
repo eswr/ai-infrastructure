@@ -1,0 +1,805 @@
+{
+ "uid": "inference-overview",
+ "title": "Inference Overview",
+ "tags": [
+  "inference-lab"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 39,
+ "refresh": "5s",
+ "time": {
+  "from": "now-30m",
+  "to": "now"
+ },
+ "templating": {
+  "list": []
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "stat",
+   "title": "Requests/s",
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "area"
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(inference_requests_total{job=\"gateway\"}[1m]))",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "type": "stat",
+   "title": "Input tok/s",
+   "gridPos": {
+    "x": 4,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "area"
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(inference_input_tokens_total{job=\"gateway\"}[1m]))",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 3,
+   "type": "stat",
+   "title": "Output tok/s",
+   "gridPos": {
+    "x": 8,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "area"
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(inference_output_tokens_total{job=\"gateway\"}[1m]))",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "type": "stat",
+   "title": "Active",
+   "gridPos": {
+    "x": 12,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "area"
+   },
+   "targets": [
+    {
+     "expr": "inference_requests_active{job=\"gateway\"}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 5,
+   "type": "stat",
+   "title": "Queued",
+   "gridPos": {
+    "x": 16,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "area"
+   },
+   "targets": [
+    {
+     "expr": "inference_requests_queued{job=\"gateway\"}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 6,
+   "type": "stat",
+   "title": "Errors/s",
+   "gridPos": {
+    "x": 20,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "colorMode": "value",
+    "graphMode": "area"
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(inference_requests_total{job=\"gateway\",outcome!~\"ok|rejected\"}[1m]))",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 10,
+   "type": "timeseries",
+   "title": "TTFT s (p50 / p95 / p99)",
+   "description": "",
+   "gridPos": {
+    "x": 0,
+    "y": 4,
+    "w": 8,
+    "h": 7
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.50, sum(rate(inference_ttft_seconds_bucket{job=\"gateway\"}[5m])) by (le))",
+     "refId": "A",
+     "legendFormat": "p50"
+    },
+    {
+     "expr": "histogram_quantile(0.95, sum(rate(inference_ttft_seconds_bucket{job=\"gateway\"}[5m])) by (le))",
+     "refId": "B",
+     "legendFormat": "p95"
+    },
+    {
+     "expr": "histogram_quantile(0.99, sum(rate(inference_ttft_seconds_bucket{job=\"gateway\"}[5m])) by (le))",
+     "refId": "C",
+     "legendFormat": "p99"
+    }
+   ]
+  },
+  {
+   "id": 11,
+   "type": "timeseries",
+   "title": "ITL s (p50 / p95 / p99)",
+   "description": "",
+   "gridPos": {
+    "x": 8,
+    "y": 4,
+    "w": 8,
+    "h": 7
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.50, sum(rate(inference_itl_seconds_bucket{job=\"gateway\"}[5m])) by (le))",
+     "refId": "A",
+     "legendFormat": "p50"
+    },
+    {
+     "expr": "histogram_quantile(0.95, sum(rate(inference_itl_seconds_bucket{job=\"gateway\"}[5m])) by (le))",
+     "refId": "B",
+     "legendFormat": "p95"
+    },
+    {
+     "expr": "histogram_quantile(0.99, sum(rate(inference_itl_seconds_bucket{job=\"gateway\"}[5m])) by (le))",
+     "refId": "C",
+     "legendFormat": "p99"
+    }
+   ]
+  },
+  {
+   "id": 12,
+   "type": "timeseries",
+   "title": "E2E s (p50 / p95 / p99)",
+   "description": "",
+   "gridPos": {
+    "x": 16,
+    "y": 4,
+    "w": 8,
+    "h": 7
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.50, sum(rate(inference_e2e_seconds_bucket{job=\"gateway\"}[5m])) by (le))",
+     "refId": "A",
+     "legendFormat": "p50"
+    },
+    {
+     "expr": "histogram_quantile(0.95, sum(rate(inference_e2e_seconds_bucket{job=\"gateway\"}[5m])) by (le))",
+     "refId": "B",
+     "legendFormat": "p95"
+    },
+    {
+     "expr": "histogram_quantile(0.99, sum(rate(inference_e2e_seconds_bucket{job=\"gateway\"}[5m])) by (le))",
+     "refId": "C",
+     "legendFormat": "p99"
+    }
+   ]
+  },
+  {
+   "id": 20,
+   "type": "timeseries",
+   "title": "TTFT decomposition s (p50)",
+   "description": "Component p50s; worker_first_token still contains runtime queueing + tokenization + prefill",
+   "gridPos": {
+    "x": 0,
+    "y": 11,
+    "w": 12,
+    "h": 7
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.50, sum(rate(inference_gateway_processing_seconds_bucket{job=\"gateway\"}[5m])) by (le))",
+     "refId": "A",
+     "legendFormat": "gateway"
+    },
+    {
+     "expr": "histogram_quantile(0.50, sum(rate(inference_admission_wait_seconds_bucket{job=\"gateway\"}[5m])) by (le))",
+     "refId": "B",
+     "legendFormat": "admission wait"
+    },
+    {
+     "expr": "histogram_quantile(0.50, sum(rate(inference_worker_connect_seconds_bucket{job=\"gateway\"}[5m])) by (le))",
+     "refId": "C",
+     "legendFormat": "worker connect"
+    },
+    {
+     "expr": "histogram_quantile(0.50, sum(rate(inference_worker_first_token_seconds_bucket{job=\"gateway\"}[5m])) by (le))",
+     "refId": "D",
+     "legendFormat": "worker first token (queue+tok+prefill)"
+    }
+   ]
+  },
+  {
+   "id": 21,
+   "type": "timeseries",
+   "title": "Queue pressure",
+   "description": "Work-accounted queue depth and the controller's own wait estimate",
+   "gridPos": {
+    "x": 12,
+    "y": 11,
+    "w": 12,
+    "h": 7
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "expr": "inference_queued_input_tokens{job=\"gateway\"}",
+     "refId": "A",
+     "legendFormat": "queued input tokens"
+    },
+    {
+     "expr": "inference_queued_output_tokens{job=\"gateway\"}",
+     "refId": "B",
+     "legendFormat": "queued output tokens"
+    },
+    {
+     "expr": "inference_estimated_queue_seconds{job=\"gateway\"}",
+     "refId": "C",
+     "legendFormat": "estimated queue s"
+    },
+    {
+     "expr": "inference_load_state{job=\"gateway\"}",
+     "refId": "D",
+     "legendFormat": "load state (0/1/2)"
+    }
+   ]
+  },
+  {
+   "id": 30,
+   "type": "timeseries",
+   "title": "Prompt length distribution (est input tokens)",
+   "description": "Average prompt size \u2014 the lever that moves the saturation knee",
+   "gridPos": {
+    "x": 0,
+    "y": 18,
+    "w": 12,
+    "h": 7
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(inference_input_tokens_total{job=\"gateway\"}[5m])) / sum(rate(inference_requests_total{job=\"gateway\",outcome=\"ok\"}[5m]))",
+     "refId": "A",
+     "legendFormat": "avg input tokens/request"
+    }
+   ]
+  },
+  {
+   "id": 31,
+   "type": "timeseries",
+   "title": "Cancellation & admission",
+   "description": "",
+   "gridPos": {
+    "x": 12,
+    "y": 18,
+    "w": 12,
+    "h": 7
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(inference_stream_cancelled_total{job=\"gateway\"}[5m])) by (phase)",
+     "refId": "A",
+     "legendFormat": "cancelled {{phase}}"
+    },
+    {
+     "expr": "sum(rate(inference_admission_rejections_total{job=\"gateway\"}[5m])) by (reason)",
+     "refId": "B",
+     "legendFormat": "rejected {{reason}}"
+    },
+    {
+     "expr": "rate(inference_saved_estimated_compute_seconds{job=\"gateway\"}[5m])",
+     "refId": "C",
+     "legendFormat": "saved compute s/s"
+    }
+   ]
+  },
+  {
+   "id": 40,
+   "type": "timeseries",
+   "title": "Worker health & outstanding",
+   "description": "",
+   "gridPos": {
+    "x": 0,
+    "y": 25,
+    "w": 12,
+    "h": 7
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "expr": "gateway_workers_healthy{job=\"gateway\"}",
+     "refId": "A",
+     "legendFormat": "{{worker}} healthy"
+    },
+    {
+     "expr": "gateway_worker_outstanding{job=\"gateway\"}",
+     "refId": "B",
+     "legendFormat": "{{worker}} outstanding"
+    }
+   ]
+  },
+  {
+   "id": 41,
+   "type": "timeseries",
+   "title": "Adaptive service model (learned ms/token)",
+   "description": "Learned online from worker first-token and streaming observations",
+   "gridPos": {
+    "x": 12,
+    "y": 25,
+    "w": 12,
+    "h": 7
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 5,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "expr": "gateway_worker_prefill_ms_per_token{job=\"gateway\"}",
+     "refId": "A",
+     "legendFormat": "{{worker}} prefill ms/tok"
+    },
+    {
+     "expr": "gateway_worker_decode_ms_per_token{job=\"gateway\"}",
+     "refId": "B",
+     "legendFormat": "{{worker}} decode ms/tok"
+    },
+    {
+     "expr": "gateway_worker_fixed_overhead_ms{job=\"gateway\"}",
+     "refId": "C",
+     "legendFormat": "{{worker}} fixed ms"
+    }
+   ]
+  }
+ ]
+}
