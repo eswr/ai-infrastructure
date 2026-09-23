@@ -1,0 +1,26 @@
+[package]
+name = "loadgen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "loadgen"
+path = "src/main.rs"
+
+[dependencies]
+inference-lab-protocol = { workspace = true }
+inference-lab-streaming = { workspace = true }
+inference-lab-metrics = { workspace = true }
+inference-lab-workload = { workspace = true }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+reqwest = { workspace = true }
+futures-util = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

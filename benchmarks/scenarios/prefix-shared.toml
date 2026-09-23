@@ -1,0 +1,13 @@
+# Prefix-cache experiment: every request shares a 1024-token prefix.
+# Compare against ttft-scan-style runs with shared_prefix_tokens = 0.
+name = "prefix-shared"
+endpoint = "http://127.0.0.1:8082"
+model = "mlx-community/Qwen3.5-9B-4bit"
+concurrency = 4
+num_requests = 16
+input_tokens = 1536
+shared_prefix_tokens = 1024
+output_tokens = 128
+stream = true
+arrival = "burst"
+timeout_s = 300

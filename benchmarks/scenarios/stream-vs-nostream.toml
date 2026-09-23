@@ -1,0 +1,11 @@
+# Streaming vs buffered responses: same load, stream on/off.
+name = "stream-vs-nostream"
+endpoint = "http://127.0.0.1:8082"
+model = "mlx-community/Qwen3.5-9B-4bit"
+concurrency = 2
+num_requests = 8
+input_tokens = 512
+output_tokens = 128
+stream = false
+arrival = "burst"
+timeout_s = 300

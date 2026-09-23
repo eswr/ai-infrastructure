@@ -1,0 +1,127 @@
+# Principal study: prompt length × concurrency on MLX-LM (9B-4bit).
+#
+# 16 measured runs: input {128, 1K, 4K, 8K} × concurrency {1, 2, 4, 8},
+# output fixed at 256 tokens, streaming, burst arrivals, through the
+# gateway (:8080) → mlx-lm worker (:8082). Prompts are per-request unique
+# (shared_prefix_tokens = 0), so TTFT is prefill-dominated as intended.
+#
+# Run:  make matrix MATRIX=mlx-prompt-concurrency
+# Then: make analyze STUDY=<printed results dir>
+
+study = "mlx-prompt-concurrency"
+description = "prompt length x concurrency sweep, Qwen3.5-9B-4bit on mlx-lm, via gateway, out=256, burst, stream"
+cooldown_s = 5.0
+
+[defaults]
+endpoint = "http://127.0.0.1:8080"   # gateway → mlx worker
+model = "mlx-community/Qwen3.5-9B-4bit"
+output_tokens = 256
+stream = true
+arrival = "burst"
+timeout_s = 900
+seed = 42
+
+# Unmeasured: page weights in, warm JIT/connections. Aborts the matrix on failure.
+[[warmup]]
+name = "warmup"
+input_tokens = 1024
+concurrency = 1
+num_requests = 3
+output_tokens = 32
+
+# Cheap runs first so misconfiguration surfaces before the expensive ones.
+[[runs]]
+name = "p128-c1"
+input_tokens = 128
+concurrency = 1
+num_requests = 8
+
+[[runs]]
+name = "p128-c2"
+input_tokens = 128
+concurrency = 2
+num_requests = 8
+
+[[runs]]
+name = "p128-c4"
+input_tokens = 128
+concurrency = 4
+num_requests = 8
+
+[[runs]]
+name = "p128-c8"
+input_tokens = 128
+concurrency = 8
+num_requests = 16
+
+[[runs]]
+name = "p1024-c1"
+input_tokens = 1024
+concurrency = 1
+num_requests = 8
+
+[[runs]]
+name = "p1024-c2"
+input_tokens = 1024
+concurrency = 2
+num_requests = 8
+
+[[runs]]
+name = "p1024-c4"
+input_tokens = 1024
+concurrency = 4
+num_requests = 8
+
+[[runs]]
+name = "p1024-c8"
+input_tokens = 1024
+concurrency = 8
+num_requests = 16
+
+[[runs]]
+name = "p4096-c1"
+input_tokens = 4096
+concurrency = 1
+num_requests = 8
+
+[[runs]]
+name = "p4096-c2"
+input_tokens = 4096
+concurrency = 2
+num_requests = 8
+
+[[runs]]
+name = "p4096-c4"
+input_tokens = 4096
+concurrency = 4
+num_requests = 8
+
+[[runs]]
+name = "p4096-c8"
+input_tokens = 4096
+concurrency = 8
+num_requests = 16
+
+[[runs]]
+name = "p8192-c1"
+input_tokens = 8192
+concurrency = 1
+num_requests = 8
+
+[[runs]]
+name = "p8192-c2"
+input_tokens = 8192
+concurrency = 2
+num_requests = 8
+
+[[runs]]
+name = "p8192-c4"
+input_tokens = 8192
+concurrency = 4
+num_requests = 8
+
+[[runs]]
+name = "p8192-c8"
+input_tokens = 8192
+concurrency = 8
+num_requests = 16

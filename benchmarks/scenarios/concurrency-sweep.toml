@@ -1,0 +1,11 @@
+# Queueing/batching behaviour: steady arrivals, several in-flight requests.
+name = "concurrency-sweep"
+endpoint = "http://127.0.0.1:8082"
+model = "mlx-community/Qwen3.5-9B-4bit"
+concurrency = 8
+num_requests = 32
+input_tokens = 1024
+output_tokens = 128
+stream = true
+arrival = { constant = { interval_s = 0.5 } }
+timeout_s = 300

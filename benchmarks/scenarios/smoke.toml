@@ -1,0 +1,12 @@
+# Sanity check: quick run against the cached 9B-4bit model.
+name = "smoke"
+endpoint = "http://127.0.0.1:8082"
+model = "mlx-community/Qwen3.5-9B-4bit"
+concurrency = 1
+num_requests = 4
+input_tokens = 128
+output_tokens = 32
+stream = true
+arrival = "burst"
+timeout_s = 120
+seed = 42

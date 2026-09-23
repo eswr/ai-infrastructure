@@ -1,0 +1,11 @@
+# TTFT vs prompt length: long prompts stress the prefill path.
+name = "ttft-scan"
+endpoint = "http://127.0.0.1:8082"
+model = "mlx-community/Qwen3.5-9B-4bit"
+concurrency = 1
+num_requests = 8
+input_tokens = 4096
+output_tokens = 128
+stream = true
+arrival = "burst"
+timeout_s = 300

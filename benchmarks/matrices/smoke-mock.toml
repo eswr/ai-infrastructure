@@ -1,0 +1,30 @@
+# Pipeline self-test: validates the matrix runner + analyzer against the
+# mock worker (make worker-mock, :8090) before spending GPU time.
+study = "smoke-mock"
+description = "loadgen matrix-mode self-test against the mock worker"
+cooldown_s = 1.0
+
+[defaults]
+endpoint = "http://127.0.0.1:8090"
+model = "mock"
+output_tokens = 16
+stream = true
+arrival = "burst"
+
+[[warmup]]
+name = "warmup"
+input_tokens = 128
+concurrency = 1
+num_requests = 2
+
+[[runs]]
+name = "p128-c1"
+input_tokens = 128
+concurrency = 1
+num_requests = 4
+
+[[runs]]
+name = "p512-c2"
+input_tokens = 512
+concurrency = 2
+num_requests = 4
