@@ -20,7 +20,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{Stream, StreamExt};
 use inference_lab_protocol::ChatCompletionRequest;
-use inference_lab_scheduler::{RoutingPolicy, Router as WorkerRouter, WorkerHandle};
+use inference_lab_scheduler::{
+    RequestShape, RoutingPolicy, Router as WorkerRouter, SelectOutcome, WorkerHandle,
+};
 use prometheus::{Encoder, IntCounter, IntCounterVec, IntGauge, Registry, TextEncoder};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
@@ -118,14 +120,29 @@ async fn chat_completions(
     st.metrics.active_requests.inc();
 
     let hash = prefix_hash(&req);
-    let worker = st.router.select(hash, req.max_tokens);
-    worker.outstanding.fetch_add(1, Ordering::Relaxed);
+    let est_input: u64 = req
+        .messages
+        .iter()
+        .map(|m| m.content.split_whitespace().count() as u64 * 3 / 4)
+        .sum::<u64>()
+        .max(1);
+    let worker = match st.router.select(RequestShape {
+        prefix_hash: hash,
+        input_tokens: est_input,
+        output_tokens: req.max_tokens as u64,
+    }) {
+        SelectOutcome::Worker(w) => w,
+        SelectOutcome::AllUnhealthy => {
+            return error_json(StatusCode::SERVICE_UNAVAILABLE, "no healthy workers");
+        }
+    };
+    worker.inc_outstanding();
     tracing::info!(worker = %worker.id, model = %req.model, stream = req.stream, "routing request");
 
     let worker_for_err = worker.clone();
     let metrics = st.metrics.clone();
     let cleanup = move || {
-        worker_for_err.outstanding.fetch_sub(1, Ordering::Relaxed);
+        worker_for_err.dec_outstanding();
         metrics.active_requests.dec();
     };
 
