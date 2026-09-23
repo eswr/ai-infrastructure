@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/gateway",
+    "apps/loadgen",
+    "crates/protocol",
+    "crates/scheduler",
+    "crates/streaming",
+    "crates/metrics",
+    "crates/workload",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+inference-lab-protocol = { path = "crates/protocol" }
+inference-lab-scheduler = { path = "crates/scheduler" }
+inference-lab-streaming = { path = "crates/streaming" }
+inference-lab-metrics = { path = "crates/metrics" }
+inference-lab-workload = { path = "crates/workload" }
+
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal", "sync", "net"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+axum = "0.8"
+futures-util = "0.3"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.9"
+toml = "0.8"
+prometheus = "0.14"
+
+[profile.release]
+lto = "thin"

@@ -1,0 +1,54 @@
+{
+  "uid": "inference-lab-serving",
+  "title": "Inference Lab — Serving",
+  "tags": ["inference-lab"],
+  "timezone": "browser",
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Gateway requests/s",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": null },
+      "targets": [
+        { "expr": "rate(gateway_requests_total[1m])", "legendFormat": "req/s" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Active requests (gateway)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": null },
+      "targets": [
+        { "expr": "gateway_active_requests", "legendFormat": "in-flight" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Upstream failures/s by worker",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": null },
+      "targets": [
+        {
+          "expr": "sum by (worker, reason) (rate(gateway_upstream_failures_total[1m]))",
+          "legendFormat": "{{worker}} ({{reason}})"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Scrape targets up",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": null },
+      "targets": [
+        { "expr": "up", "legendFormat": "{{job}}" }
+      ]
+    }
+  ]
+}

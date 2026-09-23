@@ -1,0 +1,23 @@
+# Rust
+/target
+**/target
+Cargo.lock.orig
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Benchmark outputs (keep the dir, ignore generated results)
+benchmarks/results/*
+!benchmarks/results/.gitkeep
+
+# Local state
+.env
+*.log
+.DS_Store
+tmp/
+
+# Model caches / weights never belong in git
+*.gguf
+*.safetensors

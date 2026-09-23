@@ -1,0 +1,10 @@
+[project]
+name = "vllm-metal-worker"
+version = "0.1.0"
+description = "vLLM-Metal inference worker environment for inference-lab"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "vllm-metal>=0.1.0",
+    # The heavy `vllm` extra (torch + full vLLM stack, multi-GB) is added on
+    # demand: uv add "vllm-metal[vllm]" — only needed to run under upstream vLLM.
+]

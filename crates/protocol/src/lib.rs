@@ -1,0 +1,187 @@
+//! Wire types for the OpenAI-compatible chat API plus the worker
+//! advertisement format used by the gateway/router.
+//!
+//! These types are deliberately permissive (unknown fields are ignored) so
+//! the same structs work against vLLM-Metal, MLX-LM, llama.cpp and the mock
+//! worker, all of which drift slightly from the OpenAI schema.
+
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Chat completions
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct Message {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionRequest {
+    pub model: String,
+    pub messages: Vec<Message>,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    /// Bumped by loadgen so servers that support it report token usage in the
+    /// final streamed chunk.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_usage: bool,
+}
+
+fn default_max_tokens() -> u32 {
+    128
+}
+
+fn default_temperature() -> f32 {
+    1.0
+}
+
+impl ChatCompletionRequest {
+    pub fn simple(model: impl Into<String>, prompt: impl Into<String>) -> Self {
+        Self {
+            model: model.into(),
+            messages: vec![Message {
+                role: "user".into(),
+                content: prompt.into(),
+            }],
+            stream: false,
+            max_tokens: default_max_tokens(),
+            temperature: default_temperature(),
+            top_p: None,
+            include_usage: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Usage {
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionResponse {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<Choice>,
+    #[serde(default)]
+    pub usage: Usage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Choice {
+    pub index: u32,
+    pub message: Message,
+    pub finish_reason: Option<String>,
+}
+
+/// One streamed chunk (`object: "chat.completion.chunk"`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionChunk {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    #[serde(default)]
+    pub choices: Vec<ChunkChoice>,
+    /// Present in the final chunk when the request asked for `include_usage`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkChoice {
+    pub index: u32,
+    pub delta: Delta,
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Delta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// Thinking models (e.g. Qwen3.5) stream generated tokens here instead
+    /// of `content` during the reasoning phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+}
+
+/// Extract the generated text from a streamed chunk, if any. Reasoning
+/// tokens count too — for latency measurement a token is a token.
+pub fn chunk_text(chunk: &ChatCompletionChunk) -> Option<&str> {
+    chunk
+        .choices
+        .iter()
+        .find_map(|c| c.delta.content.as_deref().or(c.delta.reasoning.as_deref()))
+        .filter(|s| !s.is_empty())
+}
+
+// ---------------------------------------------------------------------------
+// Worker advertisement (what each worker exposes for routing decisions)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct WorkerStatus {
+    pub worker_id: String,
+    pub model: String,
+    /// `vllm-metal` | `mlx-lm` | `llama-cpp` | `mock`
+    pub runtime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantization: Option<String>,
+    #[serde(default)]
+    pub max_context: u64,
+    pub active_requests: u64,
+    pub waiting_requests: u64,
+    /// 0.0–1.0
+    #[serde(default)]
+    pub kv_utilization: f32,
+    #[serde(default)]
+    pub prefixes_cached: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_p50_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_p95_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_tok_s: Option<f64>,
+    /// 0.0–1.0
+    #[serde(default)]
+    pub memory_pressure: f32,
+    pub healthy: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_stream_chunk_with_unknown_fields() {
+        let raw = r#"{"id":"1","object":"chat.completion.chunk","created":1,"model":"m",
+                      "choices":[{"index":0,"delta":{"content":"tok"},"finish_reason":null}],
+                      "logprobs":null,"system_fingerprint":"fp"}"#;
+        let chunk: ChatCompletionChunk = serde_json::from_str(raw).unwrap();
+        assert_eq!(chunk_text(&chunk), Some("tok"));
+    }
+
+    #[test]
+    fn parses_done_usage_chunk() {
+        let raw = r#"{"id":"1","object":"chat.completion.chunk","created":1,"model":"m",
+                      "choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
+        let chunk: ChatCompletionChunk = serde_json::from_str(raw).unwrap();
+        assert_eq!(chunk.usage.unwrap().completion_tokens, 5);
+    }
+}
