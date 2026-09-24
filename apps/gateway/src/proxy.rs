@@ -23,6 +23,7 @@ use inference_lab_scheduler::WorkerHandle;
 use inference_lab_streaming::SseParser;
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry::KeyValue;
+use std::future::Future as _;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
@@ -199,10 +200,17 @@ pub struct InstrumentedStream<S> {
     json_buf: Vec<u8>,
     last_token_at: Option<Instant>,
     finished: bool,
+    /// Arms the first-token watchdog: a real timer future so a *silent*
+    /// upstream still wakes this stream's poll at the deadline (polling is
+    /// otherwise driven purely by upstream data).
+    watchdog: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl<S> InstrumentedStream<S> {
     pub fn new(inner: S, ctx: StreamCtx) -> Self {
+        let watchdog = ctx
+            .first_token_deadline
+            .map(|d| Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(d))));
         Self {
             inner,
             ctx,
@@ -210,6 +218,7 @@ impl<S> InstrumentedStream<S> {
             json_buf: Vec::new(),
             last_token_at: None,
             finished: false,
+            watchdog,
         }
     }
 
@@ -257,6 +266,7 @@ impl<S> InstrumentedStream<S> {
     fn on_first_token(&mut self) {
         let now = Instant::now();
         self.ctx.timeline.first_token_at = Some(now);
+        self.watchdog = None; // token arrived: disarm
         // Close the waiting-for-first-token span, open the streaming span.
         if let Some(cx) = self.ctx.spans.first_token.take() {
             cx.span().end();
@@ -430,11 +440,12 @@ where
     type Item = reqwest::Result<bytes::Bytes>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        // First-token watchdog: checked on every wakeup so a hung worker
-        // cannot hold a slot forever.
-        if !self.finished {
-            if let (Some(deadline), None) = (self.ctx.first_token_deadline, self.ctx.timeline.first_token_at) {
-                if Instant::now() >= deadline {
+        // First-token watchdog: the timer registers our waker, so even a
+        // fully silent upstream gets aborted at the deadline.
+        if let Some(sleep) = self.watchdog.as_mut() {
+            if matches!(sleep.as_mut().poll(cx), Poll::Ready(())) {
+                self.watchdog = None;
+                if !self.finished && self.ctx.timeline.first_token_at.is_none() {
                     self.finish(Outcome::FirstTokenTimeout);
                     return Poll::Ready(None);
                 }
