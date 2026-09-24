@@ -21,7 +21,17 @@ fn latency_buckets() -> Vec<f64> {
 }
 
 fn itl_buckets() -> Vec<f64> {
-    vec![0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+    vec![
+        0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0,
+    ]
+}
+
+/// A stream that stalls can stall for a long time; this is the "one user
+/// stared at a frozen spinner for a minute" scale, not the ITL scale.
+fn stall_buckets() -> Vec<f64> {
+    vec![
+        0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
+    ]
 }
 
 fn gauge_vec(name: &str, help: &str, labels: &[&str]) -> anyhow::Result<IntGaugeVec> {
@@ -58,6 +68,17 @@ pub struct Metrics {
     pub worker_first_token: Histogram,
     pub itl: Histogram,
     pub e2e: Histogram,
+
+    // -- stream fairness (per-request aggregates) -----------------------------
+    // Pooled ITL/E2E hide a starved minority: one stream with 10 s gaps
+    // among nine healthy ones barely moves the pooled percentiles. These
+    // are per-request aggregates, so starvation stays visible.
+    /// Per-request *mean* inter-token latency across the decode phase.
+    pub stream_inter_token: Histogram,
+    /// Per-request worst gap between consecutive tokens.
+    pub stream_max_stall: Histogram,
+    /// Per-request stream wall time (response headers → stream end).
+    pub stream_completion: Histogram,
 
     // -- queue / admission ----------------------------------------------------
     pub requests_active: IntGauge,
@@ -111,8 +132,10 @@ impl Metrics {
             requests_total.with_label_values(&[outcome]);
         }
 
-        let requests_in_flight =
-            IntGauge::new("inference_requests_in_flight", "Requests inside a gateway handler")?;
+        let requests_in_flight = IntGauge::new(
+            "inference_requests_in_flight",
+            "Requests inside a gateway handler",
+        )?;
         let input_tokens_total = IntCounter::new(
             "inference_input_tokens_total",
             "Estimated prompt tokens admitted (calibrated estimator)",
@@ -123,7 +146,9 @@ impl Metrics {
         )?;
 
         let h = |name: &str, help: &str, buckets: Vec<f64>| -> anyhow::Result<Histogram> {
-            Ok(Histogram::with_opts(HistogramOpts::new(name, help).buckets(buckets))?)
+            Ok(Histogram::with_opts(
+                HistogramOpts::new(name, help).buckets(buckets),
+            )?)
         };
         let ttft = h(
             "inference_ttft_seconds",
@@ -143,7 +168,9 @@ impl Metrics {
         let worker_connect = h(
             "inference_worker_connect_seconds",
             "Upstream request send → response headers",
-            vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],
+            vec![
+                0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+            ],
         )?;
         let worker_first_token = h(
             "inference_worker_first_token_seconds",
@@ -160,11 +187,30 @@ impl Metrics {
             "End-to-end request time, gateway entry → stream end",
             latency_buckets(),
         )?;
+        let stream_inter_token = h(
+            "inference_stream_inter_token_seconds",
+            "Per-stream mean inter-token latency (decode phase average, not pooled)",
+            itl_buckets(),
+        )?;
+        let stream_max_stall = h(
+            "inference_stream_max_stall_seconds",
+            "Per-stream longest gap between consecutive tokens (stream starvation signal)",
+            stall_buckets(),
+        )?;
+        let stream_completion = h(
+            "inference_stream_completion_seconds",
+            "Per-request stream duration (response headers → stream end)",
+            latency_buckets(),
+        )?;
 
-        let requests_active =
-            IntGauge::new("inference_requests_active", "Requests currently dispatched to a worker")?;
-        let requests_queued =
-            IntGauge::new("inference_requests_queued", "Requests waiting for admission")?;
+        let requests_active = IntGauge::new(
+            "inference_requests_active",
+            "Requests currently dispatched to a worker",
+        )?;
+        let requests_queued = IntGauge::new(
+            "inference_requests_queued",
+            "Requests waiting for admission",
+        )?;
         let queued_input_tokens = IntGauge::new(
             "inference_queued_input_tokens",
             "Estimated input tokens waiting in the admission queue",
@@ -208,17 +254,26 @@ impl Metrics {
         )?;
 
         let scheduler_decisions_total = IntCounterVec::new(
-            Opts::new("scheduler_decisions_total", "Worker selections by policy and worker"),
+            Opts::new(
+                "scheduler_decisions_total",
+                "Worker selections by policy and worker",
+            ),
             &["policy", "worker"],
         )?;
         let worker_errors_total = IntCounterVec::new(
             Opts::new("worker_errors_total", "Worker failures by kind"),
             &["worker", "reason"],
         )?;
-        let workers_healthy =
-            gauge_vec("gateway_workers_healthy", "Worker health flag (1/0)", &["worker"])?;
-        let worker_outstanding =
-            gauge_vec("gateway_worker_outstanding", "Outstanding requests per worker", &["worker"])?;
+        let workers_healthy = gauge_vec(
+            "gateway_workers_healthy",
+            "Worker health flag (1/0)",
+            &["worker"],
+        )?;
+        let worker_outstanding = gauge_vec(
+            "gateway_worker_outstanding",
+            "Outstanding requests per worker",
+            &["worker"],
+        )?;
         let worker_prefill_ms_per_tok = gauge_vec(
             "gateway_worker_prefill_ms_per_token",
             "Adaptive prefill cost estimate (EWMA regression intercept+rate model)",
@@ -251,6 +306,9 @@ impl Metrics {
         reg!(registry, worker_first_token);
         reg!(registry, itl);
         reg!(registry, e2e);
+        reg!(registry, stream_inter_token);
+        reg!(registry, stream_max_stall);
+        reg!(registry, stream_completion);
         reg!(registry, requests_active);
         reg!(registry, requests_queued);
         reg!(registry, queued_input_tokens);
@@ -283,6 +341,9 @@ impl Metrics {
             worker_first_token,
             itl,
             e2e,
+            stream_inter_token,
+            stream_max_stall,
+            stream_completion,
             requests_active,
             requests_queued,
             queued_input_tokens,

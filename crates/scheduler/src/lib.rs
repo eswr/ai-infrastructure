@@ -592,10 +592,14 @@ mod tests {
     #[test]
     fn end_work_removes_estimate() {
         let w = worker("w");
-        let t = Instant::now();
-        w.begin_work(1234.0);
+        let stored = w.begin_work(1234.0);
         assert!((w.remaining_work_ms() - 1234.0).abs() < 5.0);
-        w.end_work(t, 1234.0); // no exact start match → not removed
+        // A start Instant that can never match the stored one. (Two
+        // consecutive Instant::now() calls can return the same tick on a
+        // coarse clock, which would "match" and remove the entry — this
+        // test exists to prove non-matching starts are ignored.)
+        let other = stored.checked_sub(std::time::Duration::from_nanos(1)).unwrap();
+        w.end_work(other, 1234.0); // no exact start match → not removed
         assert!(w.remaining_work_ms() > 0.0);
     }
 

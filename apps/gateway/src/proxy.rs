@@ -84,7 +84,8 @@ impl RequestTimeline {
     /// Gateway-side processing before dispatch: estimate + admission
     /// decision + scheduling (everything except the queue wait).
     pub fn gateway_processing(&self) -> Option<Duration> {
-        self.dispatched_at.map(|d| d.duration_since(self.t0) - self.admission_wait())
+        self.dispatched_at
+            .map(|d| d.duration_since(self.t0) - self.admission_wait())
     }
 
     /// Upstream request send → response headers.
@@ -199,6 +200,10 @@ pub struct InstrumentedStream<S> {
     /// Non-streaming body accumulation for usage extraction (bounded).
     json_buf: Vec<u8>,
     last_token_at: Option<Instant>,
+    /// Sum and max of this stream's inter-token gaps: the per-stream
+    /// fairness view (mean ITL + worst stall) pooled ITL would wash out.
+    gap_sum_s: f64,
+    gap_max_s: f64,
     finished: bool,
     /// Arms the first-token watchdog: a real timer future so a *silent*
     /// upstream still wakes this stream's poll at the deadline (polling is
@@ -217,6 +222,8 @@ impl<S> InstrumentedStream<S> {
             parser: SseParser::new(),
             json_buf: Vec::new(),
             last_token_at: None,
+            gap_sum_s: 0.0,
+            gap_max_s: 0.0,
             finished: false,
             watchdog,
         }
@@ -249,10 +256,9 @@ impl<S> InstrumentedStream<S> {
                     self.ctx.timeline.prompt_tokens_reported = Some(usage.prompt_tokens);
                     self.ctx.timeline.completion_tokens_reported = Some(usage.completion_tokens);
                     if usage.prompt_tokens > 0 {
-                        self.ctx.estimator.calibrate(
-                            self.ctx.timeline.est_input_tokens,
-                            usage.prompt_tokens,
-                        );
+                        self.ctx
+                            .estimator
+                            .calibrate(self.ctx.timeline.est_input_tokens, usage.prompt_tokens);
                     }
                 }
                 continue;
@@ -267,7 +273,7 @@ impl<S> InstrumentedStream<S> {
         let now = Instant::now();
         self.ctx.timeline.first_token_at = Some(now);
         self.watchdog = None; // token arrived: disarm
-        // Close the waiting-for-first-token span, open the streaming span.
+                              // Close the waiting-for-first-token span, open the streaming span.
         if let Some(cx) = self.ctx.spans.first_token.take() {
             cx.span().end();
         }
@@ -276,7 +282,11 @@ impl<S> InstrumentedStream<S> {
                 "first_token",
                 vec![KeyValue::new(
                     "stream.first_token_ms",
-                    self.ctx.timeline.ttft().map(|d| d.as_secs_f64() * 1000.0).unwrap_or(0.0),
+                    self.ctx
+                        .timeline
+                        .ttft()
+                        .map(|d| d.as_secs_f64() * 1000.0)
+                        .unwrap_or(0.0),
                 )],
             );
             self.ctx.spans.streaming = Some(crate::telemetry::child_span(
@@ -293,7 +303,10 @@ impl<S> InstrumentedStream<S> {
         if self.ctx.timeline.first_token_at.is_none() {
             self.on_first_token();
         } else if let Some(last) = self.last_token_at {
-            self.ctx.metrics.itl.observe(now.duration_since(last).as_secs_f64());
+            let gap = now.duration_since(last).as_secs_f64();
+            self.ctx.metrics.itl.observe(gap);
+            self.gap_sum_s += gap;
+            self.gap_max_s = self.gap_max_s.max(gap);
         }
         self.last_token_at = Some(now);
         self.ctx.timeline.output_tokens += 1;
@@ -312,7 +325,9 @@ impl<S> InstrumentedStream<S> {
         let m = &self.ctx.metrics;
         let w = &self.ctx.worker;
 
-        m.requests_total.with_label_values(&[outcome.metric_label()]).inc();
+        m.requests_total
+            .with_label_values(&[outcome.metric_label()])
+            .inc();
         if tl.dispatched_at.is_some() {
             m.input_tokens_total.inc_by(tl.est_input_tokens);
             m.output_tokens_total.inc_by(tl.output_tokens);
@@ -338,6 +353,16 @@ impl<S> InstrumentedStream<S> {
         if let Some(e) = tl.e2e() {
             m.e2e.observe(e.as_secs_f64());
         }
+        let toks = tl.output_tokens;
+        if toks >= 2 {
+            m.stream_inter_token
+                .observe(self.gap_sum_s / (toks - 1) as f64);
+            m.stream_max_stall.observe(self.gap_max_s);
+        }
+        if let (Some(h), Some(e)) = (tl.headers_at, tl.ended_at) {
+            m.stream_completion
+                .observe(e.duration_since(h).as_secs_f64());
+        }
 
         // Adaptive service model.
         if let Some(wft) = tl.worker_first_token() {
@@ -358,13 +383,17 @@ impl<S> InstrumentedStream<S> {
                 } else {
                     "first_token_timeout"
                 };
-                m.worker_errors_total.with_label_values(&[w.id.as_str(), reason]).inc();
+                m.worker_errors_total
+                    .with_label_values(&[w.id.as_str(), reason])
+                    .inc();
                 if w.record_dispatch_failure() {
                     tracing::warn!(worker = %w.id, "worker marked unhealthy after stream failure");
                 }
             }
             Outcome::ClientCancelled => {
-                m.stream_cancelled_total.with_label_values(&["active"]).inc();
+                m.stream_cancelled_total
+                    .with_label_values(&["active"])
+                    .inc();
                 // Saved compute: if we never got a token, the whole estimate;
                 // otherwise the undelivered portion of decode.
                 let saved_ms = if tl.first_token_at.is_none() {
@@ -385,11 +414,24 @@ impl<S> InstrumentedStream<S> {
         // Spans: final attributes, then close in creation order.
         if let Some(root) = self.ctx.spans.root.as_ref() {
             let rs = root.span();
-            rs.set_attribute(KeyValue::new("stream.output_tokens", tl.output_tokens as i64));
+            rs.set_attribute(KeyValue::new(
+                "stream.output_tokens",
+                tl.output_tokens as i64,
+            ));
             rs.set_attribute(KeyValue::new(
                 "stream.first_token_ms",
                 tl.ttft().map(|d| d.as_secs_f64() * 1000.0).unwrap_or(-1.0),
             ));
+            if toks >= 2 {
+                rs.set_attribute(KeyValue::new(
+                    "stream.mean_itl_ms",
+                    self.gap_sum_s / (toks - 1) as f64 * 1000.0,
+                ));
+                rs.set_attribute(KeyValue::new(
+                    "stream.max_stall_ms",
+                    self.gap_max_s * 1000.0,
+                ));
+            }
             rs.set_attribute(KeyValue::new("inference.outcome", outcome.metric_label()));
             rs.set_attribute(KeyValue::new(
                 "http.client_cancelled",
@@ -408,7 +450,10 @@ impl<S> InstrumentedStream<S> {
             rs.end();
         }
         if let Some(cx) = self.ctx.spans.streaming.take() {
-            cx.span().set_attribute(KeyValue::new("stream.output_tokens", tl.output_tokens as i64));
+            cx.span().set_attribute(KeyValue::new(
+                "stream.output_tokens",
+                tl.output_tokens as i64,
+            ));
             cx.span().end();
         }
         if let Some(cx) = self.ctx.spans.first_token.take() {
@@ -416,12 +461,16 @@ impl<S> InstrumentedStream<S> {
         }
         if let Some(cx) = self.ctx.spans.worker_request.take() {
             let s = cx.span();
-            s.set_attribute(KeyValue::new("stream.output_tokens", tl.output_tokens as i64));
+            s.set_attribute(KeyValue::new(
+                "stream.output_tokens",
+                tl.output_tokens as i64,
+            ));
             s.set_attribute(KeyValue::new("inference.outcome", outcome.metric_label()));
             s.end();
         }
 
-        m.cancel_cleanup_seconds.observe(cleanup_start.elapsed().as_secs_f64());
+        m.cancel_cleanup_seconds
+            .observe(cleanup_start.elapsed().as_secs_f64());
 
         tracing::info!(
             worker = %w.id,
@@ -467,15 +516,15 @@ where
                 if !self.ctx.stream_mode && self.json_buf.len() <= MAX_JSON_BUFFER {
                     if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&self.json_buf) {
                         if let Some(usage) = v.get("usage") {
-                            let u: Usage = serde_json::from_value(usage.clone()).unwrap_or_default();
+                            let u: Usage =
+                                serde_json::from_value(usage.clone()).unwrap_or_default();
                             self.ctx.timeline.prompt_tokens_reported = Some(u.prompt_tokens);
                             self.ctx.timeline.completion_tokens_reported =
                                 Some(u.completion_tokens);
                             if u.prompt_tokens > 0 {
-                                self.ctx.estimator.calibrate(
-                                    self.ctx.timeline.est_input_tokens,
-                                    u.prompt_tokens,
-                                );
+                                self.ctx
+                                    .estimator
+                                    .calibrate(self.ctx.timeline.est_input_tokens, u.prompt_tokens);
                             }
                             if u.completion_tokens > self.ctx.timeline.output_tokens {
                                 self.ctx.timeline.output_tokens = u.completion_tokens;
@@ -499,5 +548,137 @@ impl<S> Drop for InstrumentedStream<S> {
         if !self.finished {
             self.finish(Outcome::ClientCancelled);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::admission::{
+        AdmissionController, AdmissionDecision, AdmissionPolicy, RequestSize, TokenEstimator,
+    };
+    use bytes::Bytes;
+    use inference_lab_scheduler::WorkerHandle;
+
+    fn sse(tok: &str) -> String {
+        format!(
+            concat!(
+                "data: {{\"id\":\"t\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"m\",",
+                "\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{tok}\"}},\"finish_reason\":null}}]}}\n\n"
+            ),
+            tok = tok
+        )
+    }
+
+    fn test_ctx() -> (Arc<Metrics>, StreamCtx) {
+        let metrics = Arc::new(Metrics::new().unwrap());
+        let worker = Arc::new(WorkerHandle::new("t", "http://127.0.0.1:1", "m", "test"));
+        let ctrl = AdmissionController::new(AdmissionPolicy::default());
+        let permit = match ctrl.decide(RequestSize {
+            input_tokens: 10,
+            output_tokens: 10,
+            est_work_ms: 100.0,
+        }) {
+            AdmissionDecision::Admit(p) => p,
+            _ => panic!("disabled policy must admit immediately"),
+        };
+        let mut timeline = RequestTimeline::new(10, 10);
+        // The handler sets this on dispatch; the stream-fairness completion
+        // histogram needs it to have a start to measure from.
+        timeline.headers_at = Some(Instant::now());
+        let ctx = StreamCtx {
+            metrics: metrics.clone(),
+            worker,
+            estimator: Arc::new(TokenEstimator::new()),
+            _permit: permit,
+            _in_flight: InFlightGuard(metrics.clone()),
+            timeline,
+            spans: TraceSpans {
+                root: None,
+                worker_request: None,
+                first_token: None,
+                streaming: None,
+            },
+            first_token_deadline: None,
+            stream_mode: true,
+            work_estimate: (Instant::now(), 100.0),
+            est_total_ms: 100.0,
+        };
+        (metrics, ctx)
+    }
+
+    /// Upstream that streams `n` tokens, sleeping `gap` between tokens 2..n:
+    /// a real (std-clock) inter-token gap, small enough for tests, large
+    /// enough to land in a meaningful stall bucket.
+    fn gappy_stream(
+        tok: &str,
+        n: usize,
+        gap: Duration,
+    ) -> Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>> {
+        let tok = tok.to_string();
+        Box::pin(futures_util::stream::unfold(0usize, move |i| {
+            let tok = tok.clone();
+            async move {
+                if i >= n {
+                    return None;
+                }
+                if i > 0 {
+                    tokio::time::sleep(gap).await;
+                }
+                Some((Ok(Bytes::from(sse(&tok))), i + 1))
+            }
+        }))
+    }
+
+    fn hist_count(fams: &[prometheus::proto::MetricFamily], name: &str) -> u64 {
+        fams.iter()
+            .find(|f| f.name() == name)
+            .map(|f| f.get_metric()[0].get_histogram().get_sample_count())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn stream_fairness_metrics_track_each_stream() {
+        let (metrics, ctx) = test_ctx();
+        let mut st = InstrumentedStream::new(gappy_stream("x", 4, Duration::from_millis(80)), ctx);
+        while st.next().await.is_some() {}
+
+        let fams = metrics.registry.gather();
+        // 4 tokens = 3 gaps: one observation per stream-level histogram.
+        assert_eq!(hist_count(&fams, "inference_stream_inter_token_seconds"), 1);
+        assert_eq!(hist_count(&fams, "inference_stream_max_stall_seconds"), 1);
+        assert_eq!(hist_count(&fams, "inference_stream_completion_seconds"), 1);
+        // ~80 ms gaps must land in a sub-second stall bucket, not +Inf —
+        // the buckets are the operational signal ("was anyone stalled ≥10 s?").
+        let fam = fams
+            .iter()
+            .find(|f| f.name() == "inference_stream_max_stall_seconds")
+            .unwrap();
+        let first_populated = fam.get_metric()[0]
+            .get_histogram()
+            .get_bucket()
+            .iter()
+            .find(|b| b.cumulative_count() > 0)
+            .map(|b| b.upper_bound())
+            .unwrap_or(f64::INFINITY);
+        assert!(
+            first_populated <= 0.5,
+            "80ms stall landed in bucket {first_populated}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_fairness_metrics_skip_single_token_streams() {
+        let (metrics, ctx) = test_ctx();
+        let mut st =
+            InstrumentedStream::new(gappy_stream("only", 1, Duration::from_millis(1)), ctx);
+        while st.next().await.is_some() {}
+
+        let fams = metrics.registry.gather();
+        // One token: no inter-token gap exists, so the gap-derived
+        // histograms must stay empty rather than observe a fake zero.
+        assert_eq!(hist_count(&fams, "inference_stream_inter_token_seconds"), 0);
+        assert_eq!(hist_count(&fams, "inference_stream_max_stall_seconds"), 0);
+        assert_eq!(hist_count(&fams, "inference_stream_completion_seconds"), 1);
     }
 }

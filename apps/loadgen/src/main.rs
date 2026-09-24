@@ -22,7 +22,7 @@ mod matrix;
 use anyhow::{Context, Result};
 use clap::Parser;
 use futures_util::StreamExt;
-use inference_lab_metrics::{RequestRecord, Summary};
+use inference_lab_metrics::{percentile, RequestRecord, Summary};
 use inference_lab_protocol::{chunk_text, ChatCompletionChunk};
 use inference_lab_streaming::SseParser;
 use inference_lab_workload::{Arrival, Scenario};
@@ -131,7 +131,10 @@ fn build_scenario(cli: &Cli) -> Result<Scenario> {
     if let Some(v) = cli.stream {
         s.stream = v;
     }
-    anyhow::ensure!(!s.endpoint.is_empty(), "missing --endpoint (or a scenario file)");
+    anyhow::ensure!(
+        !s.endpoint.is_empty(),
+        "missing --endpoint (or a scenario file)"
+    );
     anyhow::ensure!(!s.model.is_empty(), "missing --model (or a scenario file)");
     Ok(s)
 }
@@ -177,7 +180,12 @@ async fn main() -> Result<()> {
 
     let ts = chrono_like_ts();
     std::fs::create_dir_all(&cli.out_dir)?;
-    let base = format!("{}/{}-{}", cli.out_dir.trim_end_matches('/'), scenario.name, ts);
+    let base = format!(
+        "{}/{}-{}",
+        cli.out_dir.trim_end_matches('/'),
+        scenario.name,
+        ts
+    );
     write_run_artifacts(&base, &summary, &records)?;
     println!("wrote {base}.json");
     println!("wrote {base}.csv");
@@ -268,7 +276,10 @@ async fn run_matrix(client: &reqwest::Client, path: &str, out_dir: &str) -> Resu
             "summary": summary,
         }));
         if summary.failed > 0 && !is_warmup {
-            eprintln!("note: {} request(s) failed in {:?}", summary.failed, scenario.name);
+            eprintln!(
+                "note: {} request(s) failed in {:?}",
+                summary.failed, scenario.name
+            );
         }
 
         if idx + 1 < total && m.cooldown_s > 0.0 {
@@ -299,8 +310,8 @@ async fn run_matrix(client: &reqwest::Client, path: &str, out_dir: &str) -> Resu
     // One-glance result table for measured runs.
     println!("\n=== {} — summary ===", m.study);
     println!(
-        "{:<14} {:>6} {:>10} {:>10} {:>10} {:>8} {:>8}",
-        "run", "ok", "ttft p50", "itl p50", "e2e p50", "req/s", "tok/s"
+        "{:<14} {:>6} {:>10} {:>10} {:>10} {:>9} {:>8} {:>8}",
+        "run", "ok", "ttft p50", "itl p50", "e2e p50", "stall max", "req/s", "tok/s"
     );
     for row in &rows {
         if row["warmup"].as_bool() == Some(true) {
@@ -319,13 +330,18 @@ async fn run_matrix(client: &reqwest::Client, path: &str, out_dir: &str) -> Resu
                 .map(|v| format!("{v:>10.0}"))
                 .unwrap_or_else(|| format!("{:>10}", "n/a"))
         };
+        let stall_max = s["stream_max_stall_ms"]["max"]
+            .as_f64()
+            .map(|v| format!("{v:>9.0}"))
+            .unwrap_or_else(|| format!("{:>9}", "n/a"));
         println!(
-            "{:<14} {:>6} {} {} {} {:>8.2} {:>8.1}",
+            "{:<14} {:>6} {} {} {} {} {:>8.2} {:>8.1}",
             name,
             ok,
             p("ttft_ms"),
             p("itl_ms"),
             p("e2e_ms"),
+            stall_max,
             s["request_throughput"].as_f64().unwrap_or(0.0),
             s["output_tok_s"].as_f64().unwrap_or(0.0),
         );
@@ -360,8 +376,10 @@ async fn execute(client: &reqwest::Client, scenario: &Scenario) -> (Vec<RequestR
         let client = client.clone();
         let scenario = scenario.clone();
         let records = records.clone();
+        let release_offset_ms = target.as_secs_f64() * 1000.0;
         tasks.push(tokio::spawn(async move {
-            let record = run_one(&client, &scenario, i).await;
+            let mut record = run_one(&client, &scenario, i).await;
+            record.release_offset_ms = release_offset_ms;
             drop(permit);
             records.lock().await.push(record);
         }));
@@ -380,18 +398,32 @@ async fn execute(client: &reqwest::Client, scenario: &Scenario) -> (Vec<RequestR
 fn write_run_artifacts(base: &str, summary: &Summary, records: &[RequestRecord]) -> Result<()> {
     let json_out = serde_json::json!({
         "summary": summary,
-        "records": records.iter().map(|r| serde_json::json!({
-            "id": r.id,
-            "ok": r.ok,
-            "error": r.error,
-            "ttft_ms": r.ttft_ms,
-            "e2e_ms": r.e2e_ms,
-            "completion_tokens": r.completion_tokens,
-            "prompt_tokens": r.prompt_tokens,
-            "token_ts_ms": r.token_ts_ms,
-        })).collect::<Vec<_>>(),
+        "records": records.iter().map(|r| {
+            let mut gaps = r.itl_ms();
+            gaps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            serde_json::json!({
+                "id": r.id,
+                "ok": r.ok,
+                "error": r.error,
+                "release_offset_ms": r.release_offset_ms,
+                "first_token_ms": r.ttft_ms,
+                "ttft_ms": r.ttft_ms,
+                "e2e_ms": r.e2e_ms,
+                "completion_ms": r.completion_ms(),
+                "completion_tokens": r.completion_tokens,
+                "prompt_tokens": r.prompt_tokens,
+                "token_ts_ms": r.token_ts_ms,
+                "itl_p50_ms": (!gaps.is_empty()).then(|| percentile(&gaps, 0.50)),
+                "itl_p95_ms": (!gaps.is_empty()).then(|| percentile(&gaps, 0.95)),
+                "itl_p99_ms": (!gaps.is_empty()).then(|| percentile(&gaps, 0.99)),
+                "max_inter_token_gap_ms": r.max_inter_token_gap_ms(),
+            })
+        }).collect::<Vec<_>>(),
     });
-    std::fs::write(format!("{base}.json"), serde_json::to_vec_pretty(&json_out)?)?;
+    std::fs::write(
+        format!("{base}.json"),
+        serde_json::to_vec_pretty(&json_out)?,
+    )?;
     std::fs::write(format!("{base}.csv"), Summary::records_csv(records))?;
     Ok(())
 }
@@ -424,7 +456,10 @@ async fn run_one(client: &reqwest::Client, scenario: &Scenario, id: usize) -> Re
     let t0 = Instant::now();
     record.prompt_tokens = Some(estimate_prompt_tokens(scenario));
 
-    let url = format!("{}/v1/chat/completions", scenario.endpoint.trim_end_matches('/'));
+    let url = format!(
+        "{}/v1/chat/completions",
+        scenario.endpoint.trim_end_matches('/')
+    );
     let req = scenario.request(id);
 
     let resp = match client
@@ -444,7 +479,10 @@ async fn run_one(client: &reqwest::Client, scenario: &Scenario, id: usize) -> Re
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        record.fail(format!("http {status}: {}", body.chars().take(200).collect::<String>()));
+        record.fail(format!(
+            "http {status}: {}",
+            body.chars().take(200).collect::<String>()
+        ));
         return record;
     }
 
