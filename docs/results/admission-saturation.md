@@ -127,3 +127,48 @@ anomaly in gauges → fix the policy → regression-test it.
    server). Bound what reaches the model.
 4. **The queue is observable.** Every wait in run B has a name, a metric,
    and a trace span; nothing in run A did.
+
+## Reproducibility: the tagged rerun
+
+Phase 3 is frozen as tag `phase-3-admission-control`. From a fresh clone:
+
+```bash
+make setup                            # toolchain checks + workspace build
+make test                             # 39 Rust tests
+make up                               # Prometheus/Grafana/Tempo/Loki/OTel
+make failcheck                        # 6/6 failure-injection scenarios
+make experiment-admission-saturation  # the A/B below (~25 min on an M5, 24 GB)
+```
+
+Every experiment now writes a provenance manifest (`benchmarks/manifest.py`):
+git commit, OS/machine/RAM, python/rust toolchain, mlx + mlx-lm versions,
+model + quantization, exact worker/gateway/experiment args, timestamps, and
+each run's summary block — finalized even if the run dies mid-flight. The
+rerun's manifest: commit `f6764e4`, macOS 27.0, Apple M5 24 GB, mlx 0.32.2 /
+mlx-lm 0.31.3, `mlx-community/Qwen3.5-9B-4bit` (4-bit affine, group 64).
+Raw artifacts: `benchmarks/results/admission-saturation-20260924-230317/`.
+
+**Run B (admission-controlled) reproduces within a few percent:**
+
+| | original | tagged rerun |
+| --- | --- | --- |
+| requests ok | 16 / 16 | **16 / 16** |
+| makespan | 786 s | **763 s** |
+| ITL p50 / p99 | 63.7 / 119.0 ms | **60.2 / 116.7 ms** |
+| TTFT p50 | 365 s | 364 s |
+
+**Run A (unbounded) failed differently — and that is a finding, not a
+fluke.** The original run A predated two gateway fixes that landed after
+the experiment (notably the first-token watchdog, `c1526b1`), so requests
+hung silently to their 900 s client timeout: 0/16, 1800 s of nothing. On
+the tagged gateway the same burst still destroys the worker's ability to
+serve new work — but the worker now stalls its *accept path* in windows
+rather than only its generation thread, and the gateway surfaces it:
+11/16 requests fail fast with 502 (upstream connect/send errors) or 503
+(no healthy workers, after connect-failure health strikes), 5/16 complete,
+136 s total, zero silent hangs. Same fault class as takeaway 3 — unbounded
+admission wedges the runtime — but now it fails **loud and fast** instead
+of quiet and slow, which is the operationally useful failure mode. What
+does not change, across both gateways: without admission control this
+workload is unservable; with it, all 16 requests complete with healthy
+decode.
