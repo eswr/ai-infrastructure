@@ -1,0 +1,91 @@
+# Cross-runtime study, leg 1/3: MLX-LM serving MLX 4-bit weights.
+#
+# Matched conditions across all three legs (mlx-lm / llama-cpp / vllm-metal):
+# Qwen3.5-9B family, output=256, streaming, burst arrivals, per-request
+# unique prompts, same gateway (:8080, admission off), same loadgen, seed 42.
+# Grid: prompt {128, 1K, 8K} x concurrency {1, 4, 8}, 8 requests per run.
+#
+# 8192-token runs get a longer client timeout: an 8-wide unbounded burst
+# queues whole prefills, so worst-case legitimate TTFT approaches
+# 8 x ~45 s; the gateway's FIRST_TOKEN_TIMEOUT_S=900 (set by the harness)
+# aborts a genuinely silent worker well before this.
+#
+# Run via experiments/cross-runtime/run.sh (the harness owns the runtime
+# lifecycle, gateway, memory sampling and recovery probes).
+
+study = "cross-runtime-mlx-lm"
+description = "matched cross-runtime leg: mlx-lm (MLX 4-bit), prompt x concurrency grid, via gateway, out=256, burst, stream"
+cooldown_s = 10.0
+
+[defaults]
+endpoint = "http://127.0.0.1:8080"   # gateway → mlx-lm worker (:8082)
+model = "mlx-community/Qwen3.5-9B-4bit"
+output_tokens = 256
+stream = true
+arrival = "burst"
+timeout_s = 900
+seed = 42
+
+[[warmup]]
+name = "warmup"
+input_tokens = 1024
+concurrency = 1
+num_requests = 3
+output_tokens = 32
+
+[[runs]]
+name = "p128-c1"
+input_tokens = 128
+concurrency = 1
+num_requests = 8
+
+[[runs]]
+name = "p128-c4"
+input_tokens = 128
+concurrency = 4
+num_requests = 8
+
+[[runs]]
+name = "p128-c8"
+input_tokens = 128
+concurrency = 8
+num_requests = 8
+
+[[runs]]
+name = "p1024-c1"
+input_tokens = 1024
+concurrency = 1
+num_requests = 8
+
+[[runs]]
+name = "p1024-c4"
+input_tokens = 1024
+concurrency = 4
+num_requests = 8
+
+[[runs]]
+name = "p1024-c8"
+input_tokens = 1024
+concurrency = 8
+num_requests = 8
+
+[[runs]]
+name = "p8192-c1"
+input_tokens = 8192
+concurrency = 1
+num_requests = 8
+timeout_s = 1800
+
+[[runs]]
+name = "p8192-c4"
+input_tokens = 8192
+concurrency = 4
+num_requests = 8
+timeout_s = 1800
+
+[[runs]]
+name = "p8192-c8"
+input_tokens = 8192
+concurrency = 8
+num_requests = 8
+timeout_s = 1800

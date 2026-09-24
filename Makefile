@@ -3,7 +3,7 @@ SCENARIO ?= smoke
 MATRIX ?= mlx-prompt-concurrency
 
 .PHONY: setup build build-release test fmt clippy bench matrix analyze failcheck \
-        experiment-admission-saturation \
+        experiment-admission-saturation experiment-cross-runtime \
         worker-mlx worker-llama worker-vllm worker-mock gateway \
         up down obs-logs k8s
 
@@ -68,6 +68,9 @@ failcheck: build-release  ## automated failure-injection suite against the mock 
 
 experiment-admission-saturation: build-release ## the centerpiece A/B: unbounded vs admission-controlled 8K×c8 (~55 min, real GPU)
 	bash experiments/admission/run.sh
+
+experiment-cross-runtime: build-release ## matched mlx-lm vs llama.cpp vs vllm-metal, 3×3 grid (~2-3 h; RT=<runtime> for one leg)
+	bash experiments/cross-runtime/run.sh $(RT)
 
 # -------------------------------------------------------- observability --
 
