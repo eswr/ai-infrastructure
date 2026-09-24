@@ -1,0 +1,185 @@
+[harness 00:41:26] mlx-lm: started pid 52599
+[harness 00:41:30] mlx-lm [wait_functional#1]: healthy (health={'http://127.0.0.1:8082/health': 200, 'http://127.0.0.1:8082/v1/models': 200}, tokens=5, error=None)
+[harness 00:41:35] mlx-lm: loadgen --matrix experiments/cross-runtime/mlx-lm.toml --out-dir benchmarks/results/cross-runtime-20260925-004124/mlx-lm
+matrix "cross-runtime-mlx-lm" — 9 measured run(s), 1 warmup → benchmarks/results/cross-runtime-20260925-004124/mlx-lm/cross-runtime-mlx-lm-20260924-191135
+
+=== [0/10] warmup "warmup"  in≈1024tok out=32tok c=1 n=3 arrival=burst ===
+scenario      warmup
+requests      3 total / 3 ok / 0 failed
+wall time     13.53s
+ttft_ms       p50    2953.9  p95    3157.1  p99    3175.1
+itl_ms        p50      45.8  p95      51.6  p99     155.8
+tpot_ms       p50      49.1  p95      66.4  p99      68.0
+e2e_ms        p50    4553.1  p95    4641.8  p99    4649.7
+stall_ms      p50      87.3  p95     617.0  max     675.9  (per-stream worst gap)
+spread        0.33s   slowest/fastest ×1.08
+req/s         0.22
+output tok/s  6.9   (93 tokens)
+input  tok/s  241.3   (3264 tokens)
+
+cooldown 10s
+
+=== [1/10] run "p128-c1"  in≈128tok out=256tok c=1 n=8 arrival=burst ===
+scenario      p128-c1
+requests      8 total / 8 ok / 0 failed
+wall time     157.04s
+ttft_ms       p50    1083.5  p95    1994.2  p99    2244.0
+itl_ms        p50      49.8  p95     108.1  p99     648.5
+tpot_ms       p50      74.3  p95      95.1  p99      96.0
+e2e_ms        p50   19936.7  p95   25705.7  p99   25868.7
+stall_ms      p50    1151.7  p95    1444.3  max    1449.7  (per-stream worst gap)
+spread        12.47s   slowest/fastest ×1.93
+req/s         0.05
+output tok/s  12.9   (2033 tokens)
+input  tok/s  9.8   (1536 tokens)
+
+cooldown 10s
+
+=== [2/10] run "p128-c4"  in≈128tok out=256tok c=4 n=8 arrival=burst ===
+scenario      p128-c4
+requests      8 total / 8 ok / 0 failed
+wall time     72.24s
+ttft_ms       p50    3137.9  p95    4018.4  p99    4050.3
+itl_ms        p50     110.5  p95     168.5  p99    1026.4
+tpot_ms       p50     130.2  p95     130.6  p99     130.6
+e2e_ms        p50   36069.0  p95   37049.8  p99   37082.1
+stall_ms      p50    1154.8  p95    1188.4  max    1188.4  (per-stream worst gap)
+spread        1.95s   slowest/fastest ×1.06
+req/s         0.11
+output tok/s  28.1   (2033 tokens)
+input  tok/s  21.3   (1536 tokens)
+
+cooldown 10s
+
+=== [3/10] run "p128-c8"  in≈128tok out=256tok c=8 n=8 arrival=burst ===
+scenario      p128-c8
+requests      8 total / 6 ok / 2 failed
+wall time     44.10s
+ttft_ms       p50    5125.6  p95    5237.0  p99    5237.2
+itl_ms        p50     136.7  p95     179.9  p99     779.9
+tpot_ms       p50     153.7  p95     153.8  p99     153.8
+e2e_ms        p50   44026.2  p95   44101.8  p99   44101.9
+stall_ms      p50     810.5  p95     810.9  max     810.9  (per-stream worst gap)
+spread        0.10s   slowest/fastest ×1.00
+req/s         0.14
+output tok/s  34.6   (1525 tokens)
+input  tok/s  34.8   (1536 tokens)
+
+note: 2 request(s) failed in "p128-c8"
+cooldown 10s
+
+=== [4/10] run "p1024-c1"  in≈1024tok out=256tok c=1 n=8 arrival=burst ===
+scenario      p1024-c1
+requests      8 total / 8 ok / 0 failed
+wall time     158.94s
+ttft_ms       p50    4069.1  p95    4501.9  p99    4502.0
+itl_ms        p50      52.8  p95      74.2  p99     541.2
+tpot_ms       p50      64.8  p95      66.8  p99      66.9
+e2e_ms        p50   20402.9  p95   21393.4  p99   21423.8
+stall_ms      p50     778.0  p95     888.0  max     899.2  (per-stream worst gap)
+spread        3.54s   slowest/fastest ×1.20
+req/s         0.05
+output tok/s  12.8   (2032 tokens)
+input  tok/s  54.8   (8704 tokens)
+
+cooldown 10s
+
+=== [5/10] run "p1024-c4"  in≈1024tok out=256tok c=4 n=8 arrival=burst ===
+scenario      p1024-c4
+requests      8 total / 8 ok / 0 failed
+wall time     159.58s
+ttft_ms       p50   31973.8  p95   32757.4  p99   32758.6
+itl_ms        p50     149.1  p95     288.1  p99    1551.0
+tpot_ms       p50     189.2  p95     196.0  p99     196.0
+e2e_ms        p50   79703.6  p95   80832.2  p99   80889.3
+stall_ms      p50    1859.0  p95    1891.7  max    1891.8  (per-stream worst gap)
+spread        2.23s   slowest/fastest ×1.03
+req/s         0.05
+output tok/s  12.7   (2032 tokens)
+input  tok/s  54.5   (8704 tokens)
+
+cooldown 10s
+
+=== [6/10] run "p1024-c8"  in≈1024tok out=256tok c=8 n=8 arrival=burst ===
+scenario      p1024-c8
+requests      8 total / 6 ok / 2 failed
+wall time     117.85s
+ttft_ms       p50   50799.2  p95   50940.5  p99   50941.3
+itl_ms        p50     211.8  p95     512.4  p99    1600.8
+tpot_ms       p50     264.5  p95     264.6  p99     264.6
+e2e_ms        p50  117745.6  p95  117849.9  p99  117850.2
+stall_ms      p50    1936.8  p95    1982.6  max    1997.8  (per-stream worst gap)
+spread        0.15s   slowest/fastest ×1.00
+req/s         0.05
+output tok/s  12.9   (1524 tokens)
+input  tok/s  73.9   (8704 tokens)
+
+note: 2 request(s) failed in "p1024-c8"
+cooldown 10s
+
+=== [7/10] run "p8192-c1"  in≈8192tok out=256tok c=1 n=8 arrival=burst ===
+scenario      p8192-c1
+requests      8 total / 8 ok / 0 failed
+wall time     549.42s
+ttft_ms       p50   44323.0  p95   50173.0  p99   50441.3
+itl_ms        p50      68.0  p95     125.0  p99    1016.7
+tpot_ms       p50      92.4  p95     103.9  p99     105.5
+e2e_ms        p50   67918.1  p95   76178.4  p99   76317.5
+stall_ms      p50    1761.0  p95    1977.0  max    1999.1  (per-stream worst gap)
+spread        16.36s   slowest/fastest ×1.27
+req/s         0.01
+output tok/s  3.7   (2032 tokens)
+input  tok/s  120.2   (66048 tokens)
+
+cooldown 10s
+
+=== [8/10] run "p8192-c4"  in≈8192tok out=256tok c=4 n=8 arrival=burst ===
+scenario      p8192-c4
+requests      8 total / 8 ok / 0 failed
+wall time     795.50s
+ttft_ms       p50  271570.9  p95  350667.6  p99  350678.0
+itl_ms        p50     165.8  p95     649.0  p99    8278.3
+tpot_ms       p50     433.3  p95    1312.8  p99    1569.8
+e2e_ms        p50  397251.3  p95  448571.7  p99  463323.0
+stall_ms      p50   16520.7  p95  147593.8  max  193001.5  (per-stream worst gap)
+spread        140.75s   slowest/fastest ×1.43
+req/s         0.01
+output tok/s  2.6   (2031 tokens)
+input  tok/s  83.0   (66048 tokens)
+
+cooldown 10s
+
+=== [9/10] run "p8192-c8"  in≈8192tok out=256tok c=8 n=8 arrival=burst ===
+scenario      p8192-c8
+requests      8 total / 6 ok / 2 failed
+wall time     905.63s
+ttft_ms       n/a
+itl_ms        n/a
+tpot_ms       n/a
+e2e_ms        p50  903960.2  p95  905292.4  p99  905560.9
+spread        4.03s   slowest/fastest ×1.00
+req/s         0.01
+output tok/s  0.0   (0 tokens)
+input  tok/s  72.9   (66048 tokens)
+
+note: 2 request(s) failed in "p8192-c8"
+
+=== cross-runtime-mlx-lm — summary ===
+run                ok   ttft p50    itl p50    e2e p50 stall max    req/s    tok/s
+p128-c1           8/8       1083         50      19937      1450     0.05     12.9
+p128-c4           8/8       3138        110      36069      1188     0.11     28.1
+p128-c8           6/8       5126        137      44026       811     0.14     34.6
+p1024-c1          8/8       4069         53      20403       899     0.05     12.8
+p1024-c4          8/8      31974        149      79704      1892     0.05     12.7
+p1024-c8          6/8      50799        212     117746      1998     0.05     12.9
+p8192-c1          8/8      44323         68      67918      1999     0.01      3.7
+p8192-c4          8/8     271571        166     397251    193001     0.01      2.6
+p8192-c8          6/8        n/a        n/a     903960       n/a     0.01      0.0
+wrote benchmarks/results/cross-runtime-20260925-004124/mlx-lm/cross-runtime-mlx-lm-20260924-191135/matrix.json
+[harness 01:34:41] mlx-lm [post_benchmark]: silent_wedge (health={'http://127.0.0.1:8082/health': 200, 'http://127.0.0.1:8082/v1/models': 200}, tokens=0, error=TimeoutError: timed out)
+[harness 01:34:41] mlx-lm: degraded after benchmark — restarting
+[harness 01:34:41] mlx-lm: stopped
+[harness 01:34:43] mlx-lm: started pid 70077
+[harness 01:34:47] mlx-lm [wait_functional#1]: healthy (health={'http://127.0.0.1:8082/health': 200, 'http://127.0.0.1:8082/v1/models': 200}, tokens=5, error=None)
+[harness 01:34:47] mlx-lm: stopped
+[harness 01:34:47] mlx-lm: lifecycle written, peak tree RSS 5373 MB

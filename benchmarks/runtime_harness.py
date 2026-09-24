@@ -55,11 +55,11 @@ def log(msg: str) -> None:
     print(f"[harness {time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def http_get(url: str, timeout_s: float = 5.0) -> tuple[int | None, str]:
+def http_get(url: str, timeout_s: float = 5.0, max_bytes: int = 1 << 20) -> tuple[int | None, str]:
     """(status, body) or (None, error) — never raises."""
     try:
         with urllib.request.urlopen(url, timeout=timeout_s) as r:
-            return r.status, r.read(2048).decode("utf-8", "replace")
+            return r.status, r.read(max_bytes).decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         return e.code, ""
     except Exception as e:
@@ -447,21 +447,7 @@ class MemorySampler(threading.Thread):
         root = self.pid_fn()
         if root is None:
             return None
-        try:
-            out = subprocess.run(
-                ["ps", "-axo", "pid=,ppid=,rss="], capture_output=True, text=True, timeout=10
-            ).stdout
-        except subprocess.SubprocessError:
-            return None
-        parents: dict[int, int] = {}
-        rss: dict[int, float] = {}
-        for line in out.splitlines():
-            parts = line.split()
-            if len(parts) != 3:
-                continue
-            pid, ppid, r = (int(x) for x in parts)
-            parents[pid] = ppid
-            rss[pid] = r
+        parents, rss = self._ps_tree()
         total, stack = 0.0, [root]
         seen: set[int] = set()
         while stack:
@@ -473,15 +459,47 @@ class MemorySampler(threading.Thread):
             stack.extend(p for p, pp in parents.items() if pp == pid)
         return total / 1024.0 if total else None
 
+    @staticmethod
+    def _ps_tree() -> tuple[dict[int, int], dict[int, float]]:
+        try:
+            out = subprocess.run(
+                ["ps", "-axo", "pid=,ppid=,rss="], capture_output=True, text=True, timeout=10
+            ).stdout
+        except subprocess.SubprocessError:
+            return {}, {}
+        parents: dict[int, int] = {}
+        rss: dict[int, float] = {}
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) != 3:
+                continue
+            pid, ppid, r = (int(x) for x in parts)
+            parents[pid] = ppid
+            rss[pid] = r
+        return parents, rss
+
     def _footprint_mb(self) -> str:
         """Physical footprint via vmmap — slower than ps, but counts the
-        wired Metal buffers that RSS underreports. Empty string on failure."""
+        wired Metal buffers that RSS underreports. Sampled on the heaviest
+        process in the tree: the root is often a thin wrapper (`uv run`,
+        bash) whose own footprint says nothing about the model."""
         root = self.pid_fn()
         if root is None:
             return ""
+        parents, rss = self._ps_tree()
+        stack, pids = [root], []
+        while stack:
+            pid = stack.pop()
+            if pid in pids:
+                continue
+            pids.append(pid)
+            stack.extend(p for p, pp in parents.items() if pp == pid)
+        if not pids:
+            return ""
+        heaviest = max(pids, key=lambda p: rss.get(p, 0))
         try:
             out = subprocess.run(
-                ["vmmap", "--summary", str(root)],
+                ["vmmap", "--summary", str(heaviest)],
                 capture_output=True, text=True, timeout=25,
             ).stdout
         except subprocess.SubprocessError:

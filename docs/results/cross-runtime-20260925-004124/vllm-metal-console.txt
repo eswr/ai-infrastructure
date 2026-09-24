@@ -1,0 +1,169 @@
+[harness 02:10:29] vllm-metal: started pid 81895
+[harness 02:10:37] vllm-metal [wait_functional#1]: healthy (health={'http://127.0.0.1:8083/health': 200, 'http://127.0.0.1:8083/v1/models': 200}, tokens=2, error=None)
+[harness 02:10:40] vllm-metal: loadgen --matrix experiments/cross-runtime/vllm-metal.toml --out-dir benchmarks/results/cross-runtime-20260925-004124/vllm-metal
+matrix "cross-runtime-vllm-metal" — 9 measured run(s), 1 warmup → benchmarks/results/cross-runtime-20260925-004124/vllm-metal/cross-runtime-vllm-metal-20260924-204040
+
+=== [0/10] warmup "warmup"  in≈1024tok out=32tok c=1 n=3 arrival=burst ===
+scenario      warmup
+requests      3 total / 3 ok / 0 failed
+wall time     21.32s
+ttft_ms       p50    6950.8  p95    8344.8  p99    8468.7
+itl_ms        n/a
+tpot_ms       p50       0.0  p95       0.0  p99       0.0
+e2e_ms        p50    6950.8  p95    8344.8  p99    8468.7
+spread        2.64s   slowest/fastest ×1.45
+req/s         0.14
+output tok/s  2.7   (58 tokens)
+input  tok/s  196.2   (4182 tokens)
+
+cooldown 10s
+
+=== [1/10] run "p128-c1"  in≈128tok out=256tok c=1 n=8 arrival=burst ===
+scenario      p128-c1
+requests      8 total / 8 ok / 0 failed
+wall time     117.06s
+ttft_ms       p50   17723.7  p95   19004.8  p99   19195.3
+itl_ms        n/a
+tpot_ms       p50       0.0  p95       0.0  p99       0.0
+e2e_ms        p50   17723.7  p95   19004.8  p99   19195.3
+spread        17.17s   slowest/fastest ×9.30
+req/s         0.07
+output tok/s  8.7   (1014 tokens)
+input  tok/s  13.6   (1592 tokens)
+
+cooldown 10s
+
+=== [2/10] run "p128-c4"  in≈128tok out=256tok c=4 n=8 arrival=burst ===
+scenario      p128-c4
+requests      8 total / 8 ok / 0 failed
+wall time     140.60s
+ttft_ms       p50   63552.8  p95   77643.1  p99   77833.0
+itl_ms        n/a
+tpot_ms       p50       0.0  p95       0.0  p99       0.0
+e2e_ms        p50   63552.8  p95   77643.1  p99   77833.0
+spread        58.88s   slowest/fastest ×4.10
+req/s         0.06
+output tok/s  6.7   (939 tokens)
+input  tok/s  11.3   (1592 tokens)
+
+cooldown 10s
+
+=== [3/10] run "p128-c8"  in≈128tok out=256tok c=8 n=8 arrival=burst ===
+scenario      p128-c8
+requests      8 total / 8 ok / 0 failed
+wall time     100.54s
+ttft_ms       p50   57769.0  p95   99634.2  p99  100360.1
+itl_ms        n/a
+tpot_ms       p50       0.0  p95       0.0  p99       0.0
+e2e_ms        p50   57769.0  p95   99634.2  p99  100360.1
+spread        84.44s   slowest/fastest ×6.25
+req/s         0.08
+output tok/s  9.5   (951 tokens)
+input  tok/s  15.8   (1592 tokens)
+
+cooldown 10s
+
+=== [4/10] run "p1024-c1"  in≈1024tok out=256tok c=1 n=8 arrival=burst ===
+scenario      p1024-c1
+requests      8 total / 8 ok / 0 failed
+wall time     106.72s
+ttft_ms       p50   13641.2  p95   19725.2  p99   20206.9
+itl_ms        n/a
+tpot_ms       p50       0.0  p95       0.0  p99       0.0
+e2e_ms        p50   13641.2  p95   19725.2  p99   20206.9
+spread        14.58s   slowest/fastest ×3.54
+req/s         0.07
+output tok/s  6.8   (723 tokens)
+input  tok/s  104.5   (11152 tokens)
+
+cooldown 10s
+
+=== [5/10] run "p1024-c4"  in≈1024tok out=256tok c=4 n=8 arrival=burst ===
+scenario      p1024-c4
+requests      8 total / 8 ok / 0 failed
+wall time     131.64s
+ttft_ms       p50   56390.3  p95   69455.7  p99   72575.6
+itl_ms        n/a
+tpot_ms       p50       0.0  p95       0.0  p99       0.0
+e2e_ms        p50   56390.3  p95   69455.7  p99   72575.6
+spread        55.18s   slowest/fastest ×4.03
+req/s         0.06
+output tok/s  8.6   (1133 tokens)
+input  tok/s  84.7   (11152 tokens)
+
+cooldown 10s
+
+=== [6/10] run "p1024-c8"  in≈1024tok out=256tok c=8 n=8 arrival=burst ===
+scenario      p1024-c8
+requests      8 total / 8 ok / 0 failed
+wall time     129.02s
+ttft_ms       p50   66847.0  p95  125046.6  p99  128226.4
+itl_ms        n/a
+tpot_ms       p50       0.0  p95       0.0  p99       0.0
+e2e_ms        p50   66847.0  p95  125046.6  p99  128226.4
+spread        109.70s   slowest/fastest ×6.68
+req/s         0.06
+output tok/s  5.9   (760 tokens)
+input  tok/s  86.4   (11152 tokens)
+
+cooldown 10s
+
+=== [7/10] run "p8192-c1"  in≈8192tok out=256tok c=1 n=8 arrival=burst ===
+scenario      p8192-c1
+requests      8 total / 8 ok / 0 failed
+wall time     370.28s
+ttft_ms       p50   47742.6  p95   51343.3  p99   51716.6
+itl_ms        n/a
+tpot_ms       p50       0.0  p95       0.0  p99       0.0
+e2e_ms        p50   47742.6  p95   51343.3  p99   51716.6
+spread        18.49s   slowest/fastest ×1.56
+req/s         0.02
+output tok/s  2.4   (894 tokens)
+input  tok/s  236.6   (87608 tokens)
+
+cooldown 10s
+
+=== [8/10] run "p8192-c4"  in≈8192tok out=256tok c=4 n=8 arrival=burst ===
+scenario      p8192-c4
+requests      8 total / 8 ok / 0 failed
+wall time     327.80s
+ttft_ms       p50  158783.6  p95  173570.6  p99  175166.2
+itl_ms        n/a
+tpot_ms       p50       0.0  p95       0.0  p99       0.0
+e2e_ms        p50  158783.6  p95  173570.6  p99  175166.2
+spread        133.03s   slowest/fastest ×4.13
+req/s         0.02
+output tok/s  2.6   (864 tokens)
+input  tok/s  267.3   (87608 tokens)
+
+cooldown 10s
+
+=== [9/10] run "p8192-c8"  in≈8192tok out=256tok c=8 n=8 arrival=burst ===
+scenario      p8192-c8
+requests      8 total / 8 ok / 0 failed
+wall time     316.45s
+ttft_ms       p50  168733.4  p95  302988.5  p99  313757.3
+itl_ms        n/a
+tpot_ms       p50       0.0  p95       0.0  p99       0.0
+e2e_ms        p50  168733.4  p95  302988.5  p99  313757.3
+spread        287.50s   slowest/fastest ×10.93
+req/s         0.03
+output tok/s  2.8   (889 tokens)
+input  tok/s  276.8   (87608 tokens)
+
+
+=== cross-runtime-vllm-metal — summary ===
+run                ok   ttft p50    itl p50    e2e p50 stall max    req/s    tok/s
+p128-c1           8/8      17724        n/a      17724       n/a     0.07      8.7
+p128-c4           8/8      63553        n/a      63553       n/a     0.06      6.7
+p128-c8           8/8      57769        n/a      57769       n/a     0.08      9.5
+p1024-c1          8/8      13641        n/a      13641       n/a     0.07      6.8
+p1024-c4          8/8      56390        n/a      56390       n/a     0.06      8.6
+p1024-c8          8/8      66847        n/a      66847       n/a     0.06      5.9
+p8192-c1          8/8      47743        n/a      47743       n/a     0.02      2.4
+p8192-c4          8/8     158784        n/a     158784       n/a     0.02      2.6
+p8192-c8          8/8     168733        n/a     168733       n/a     0.03      2.8
+wrote benchmarks/results/cross-runtime-20260925-004124/vllm-metal/cross-runtime-vllm-metal-20260924-204040/matrix.json
+[harness 02:41:34] vllm-metal [post_benchmark]: healthy (health={'http://127.0.0.1:8083/health': 200, 'http://127.0.0.1:8083/v1/models': 200}, tokens=2, error=None)
+[harness 02:41:35] vllm-metal: stopped
+[harness 02:41:35] vllm-metal: lifecycle written, peak tree RSS 3565 MB

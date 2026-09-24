@@ -1,0 +1,55 @@
+{
+  "runtime": "vllm-metal",
+  "gateway_first_token_timeout_s": 900,
+  "phases": [
+    {
+      "phase": "wait_functional#1",
+      "ts": 1790282436.841763,
+      "health": {
+        "http://127.0.0.1:8083/health": {
+          "status": 200,
+          "body": "{\"status\":\"ok\"}"
+        },
+        "http://127.0.0.1:8083/v1/models": {
+          "status": 200,
+          "body": "{\"object\":\"list\",\"data\":[{\"id\":\"mlx-community/Qwen3.5-9B-4bit\",\"object\":\"model\",\"created\":1790282436,\"owned_by\":\"vllm-metal\"}]}"
+        }
+      },
+      "mode": "json",
+      "ok": true,
+      "error": null,
+      "first_event_ms": 692.3131942749023,
+      "tokens": 2,
+      "total_ms": 692.3131942749023,
+      "verdict": "healthy"
+    },
+    {
+      "phase": "post_benchmark",
+      "ts": 1790284294.334917,
+      "health": {
+        "http://127.0.0.1:8083/health": {
+          "status": 200,
+          "body": "{\"status\":\"ok\"}"
+        },
+        "http://127.0.0.1:8083/v1/models": {
+          "status": 200,
+          "body": "{\"object\":\"list\",\"data\":[{\"id\":\"mlx-community/Qwen3.5-9B-4bit\",\"object\":\"model\",\"created\":1790284294,\"owned_by\":\"vllm-metal\"}]}"
+        }
+      },
+      "mode": "json",
+      "ok": true,
+      "error": null,
+      "first_event_ms": 507.671594619751,
+      "tokens": 2,
+      "total_ms": 507.671594619751,
+      "verdict": "healthy",
+      "gateway_metrics": {}
+    }
+  ],
+  "loadgen_exit": 0,
+  "restart_needed": false,
+  "verdict": "healthy",
+  "memory_peak_rss_mb": 3565.0,
+  "memory_peak_footprint_mb": 10.2,
+  "memory_peak_sys_used_mb": 15480.8
+}

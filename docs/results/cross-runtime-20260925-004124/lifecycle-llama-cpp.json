@@ -1,0 +1,55 @@
+{
+  "runtime": "llama-cpp",
+  "gateway_first_token_timeout_s": 900,
+  "phases": [
+    {
+      "phase": "wait_functional#1",
+      "ts": 1790280292.822285,
+      "health": {
+        "http://127.0.0.1:8085/health": {
+          "status": 200,
+          "body": "{\"status\":\"ok\"}"
+        },
+        "http://127.0.0.1:8085/v1/models": {
+          "status": 200,
+          "body": "{\"models\":[{\"name\":\"/Users/eswr/.cache/huggingface/hub/models--unsloth--Qwen3.5-9B-GGUF/snapshots/3885219b6810b007914f3a7950a8d1b469d598a5/Qwen3.5-9B-Q4_K_M.gguf\",\"model\":\"/Users/eswr/.cache/huggingfa"
+        }
+      },
+      "mode": "sse",
+      "ok": true,
+      "error": null,
+      "first_event_ms": 1040.5290126800537,
+      "tokens": 6,
+      "total_ms": 1172.7850437164307,
+      "verdict": "healthy"
+    },
+    {
+      "phase": "post_benchmark",
+      "ts": 1790282388.0897658,
+      "health": {
+        "http://127.0.0.1:8085/health": {
+          "status": 200,
+          "body": "{\"status\":\"ok\"}"
+        },
+        "http://127.0.0.1:8085/v1/models": {
+          "status": 200,
+          "body": "{\"models\":[{\"name\":\"/Users/eswr/.cache/huggingface/hub/models--unsloth--Qwen3.5-9B-GGUF/snapshots/3885219b6810b007914f3a7950a8d1b469d598a5/Qwen3.5-9B-Q4_K_M.gguf\",\"model\":\"/Users/eswr/.cache/huggingfa"
+        }
+      },
+      "mode": "sse",
+      "ok": true,
+      "error": null,
+      "first_event_ms": 38402.12392807007,
+      "tokens": 6,
+      "total_ms": 38559.717893600464,
+      "verdict": "healthy",
+      "gateway_metrics": {}
+    }
+  ],
+  "loadgen_exit": 0,
+  "restart_needed": false,
+  "verdict": "healthy",
+  "memory_peak_rss_mb": 10324.8,
+  "memory_peak_footprint_mb": 15257.6,
+  "memory_peak_sys_used_mb": 16370.6
+}

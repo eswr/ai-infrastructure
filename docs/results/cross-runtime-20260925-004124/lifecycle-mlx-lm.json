@@ -1,0 +1,76 @@
+{
+  "runtime": "mlx-lm",
+  "gateway_first_token_timeout_s": 900,
+  "phases": [
+    {
+      "phase": "wait_functional#1",
+      "ts": 1790277087.547359,
+      "health": {
+        "http://127.0.0.1:8082/health": {
+          "status": 200,
+          "body": "{\"status\": \"ok\"}"
+        },
+        "http://127.0.0.1:8082/v1/models": {
+          "status": 200,
+          "body": "{\"object\": \"list\", \"data\": [{\"id\": \"mlx-community/Qwen3.5-9B-4bit\", \"object\": \"model\", \"created\": 1790277087}]}"
+        }
+      },
+      "mode": "sse",
+      "ok": true,
+      "error": null,
+      "first_event_ms": 2263.8909816741943,
+      "tokens": 5,
+      "total_ms": 3296.3411808013916,
+      "verdict": "healthy"
+    },
+    {
+      "phase": "post_benchmark",
+      "ts": 1790280161.229239,
+      "health": {
+        "http://127.0.0.1:8082/health": {
+          "status": 200,
+          "body": "{\"status\": \"ok\"}"
+        },
+        "http://127.0.0.1:8082/v1/models": {
+          "status": 200,
+          "body": "{\"object\": \"list\", \"data\": [{\"id\": \"mlx-community/Qwen3.5-9B-4bit\", \"object\": \"model\", \"created\": 1790280161}]}"
+        }
+      },
+      "mode": null,
+      "ok": false,
+      "error": "TimeoutError: timed out",
+      "first_event_ms": null,
+      "tokens": 0,
+      "total_ms": 120008.49199295044,
+      "verdict": "silent_wedge",
+      "gateway_metrics": {}
+    },
+    {
+      "phase": "wait_functional#1",
+      "ts": 1790280284.854985,
+      "health": {
+        "http://127.0.0.1:8082/health": {
+          "status": 200,
+          "body": "{\"status\": \"ok\"}"
+        },
+        "http://127.0.0.1:8082/v1/models": {
+          "status": 200,
+          "body": "{\"object\": \"list\", \"data\": [{\"id\": \"mlx-community/Qwen3.5-9B-4bit\", \"object\": \"model\", \"created\": 1790280284}]}"
+        }
+      },
+      "mode": "sse",
+      "ok": true,
+      "error": null,
+      "first_event_ms": 2370.999574661255,
+      "tokens": 5,
+      "total_ms": 2492.126941680908,
+      "verdict": "healthy"
+    }
+  ],
+  "loadgen_exit": 0,
+  "restart_needed": true,
+  "verdict": "healthy",
+  "memory_peak_rss_mb": 5372.5,
+  "memory_peak_footprint_mb": 18534.4,
+  "memory_peak_sys_used_mb": 21418.2
+}

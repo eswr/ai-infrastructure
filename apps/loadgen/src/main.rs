@@ -537,7 +537,14 @@ async fn run_one(client: &reqwest::Client, scenario: &Scenario, id: usize) -> Re
                 record.token_ts_ms = vec![ms];
                 record.e2e_ms = Some(ms);
                 record.non_streamed = true;
-                record.ok = true;
+                if record.completion_tokens == 0 {
+                    // vllm-metal 0.1.0 sometimes answers a full JSON body
+                    // whose usage says 0 completion tokens — a silent empty
+                    // answer must not count as a delivered request.
+                    record.fail("empty completion (usage reports 0 tokens)");
+                } else {
+                    record.ok = true;
+                }
             }
             Err(e) => record.fail(format!("decode non-streamed body: {e}")),
         }
@@ -588,6 +595,12 @@ async fn run_one(client: &reqwest::Client, scenario: &Scenario, id: usize) -> Re
     }
 
     record.e2e_ms = Some(t0.elapsed().as_secs_f64() * 1000.0);
+    if record.completion_tokens == 0 && record.error.is_none() {
+        // A stream that ends cleanly but carried no content is how a
+        // watchdog-aborted prefill looks client-side; counting it "ok"
+        // hid a whole starved wave in the phase-4 study.
+        record.fail("stream ended without content tokens");
+    }
     record.ok = record.error.is_none();
     record
 }

@@ -1,0 +1,179 @@
+[harness 01:34:49] llama-cpp: started pid 70120
+[harness 01:34:53] llama-cpp [wait_functional#1]: healthy (health={'http://127.0.0.1:8085/health': 200, 'http://127.0.0.1:8085/v1/models': 200}, tokens=6, error=None)
+[harness 01:35:13] llama-cpp: loadgen --matrix experiments/cross-runtime/llama-cpp.toml --out-dir benchmarks/results/cross-runtime-20260925-004124/llama-cpp
+matrix "cross-runtime-llama-cpp" — 9 measured run(s), 1 warmup → benchmarks/results/cross-runtime-20260925-004124/llama-cpp/cross-runtime-llama-cpp-20260924-200513
+
+=== [0/10] warmup "warmup"  in≈1024tok out=32tok c=1 n=3 arrival=burst ===
+scenario      warmup
+requests      3 total / 3 ok / 0 failed
+wall time     17.14s
+ttft_ms       p50    3584.8  p95    4029.5  p99    4069.1
+itl_ms        p50      46.0  p95      53.4  p99     810.7
+tpot_ms       p50      71.8  p95      73.5  p99      73.7
+e2e_ms        p50    5695.6  p95    5852.3  p99    5866.3
+stall_ms      p50     805.0  p95     869.1  max     876.2  (per-stream worst gap)
+spread        0.30s   slowest/fastest ×1.05
+req/s         0.18
+output tok/s  5.6   (96 tokens)
+input  tok/s  190.4   (3264 tokens)
+
+cooldown 10s
+
+=== [1/10] run "p128-c1"  in≈128tok out=256tok c=1 n=8 arrival=burst ===
+scenario      p128-c1
+requests      8 total / 8 ok / 0 failed
+wall time     200.96s
+ttft_ms       p50    1141.1  p95    1538.2  p99    1541.0
+itl_ms        p50      76.9  p95     152.1  p99     817.0
+tpot_ms       p50     100.3  p95     117.3  p99     119.7
+e2e_ms        p50   27020.1  p95   31263.8  p99   32032.6
+stall_ms      p50    1118.4  p95    1711.9  max    1745.9  (per-stream worst gap)
+spread        17.13s   slowest/fastest ×2.14
+req/s         0.04
+output tok/s  10.2   (2048 tokens)
+input  tok/s  7.6   (1536 tokens)
+
+cooldown 10s
+
+=== [2/10] run "p128-c4"  in≈128tok out=256tok c=4 n=8 arrival=burst ===
+scenario      p128-c4
+requests      8 total / 8 ok / 0 failed
+wall time     101.86s
+ttft_ms       p50     600.7  p95     709.0  p99     709.0
+itl_ms        p50     168.6  p95     288.3  p99     909.6
+tpot_ms       p50     197.4  p95     204.9  p99     204.9
+e2e_ms        p50   50930.9  p95   52947.7  p99   52947.7
+stall_ms      p50     997.1  p95    1008.0  max    1008.1  (per-stream worst gap)
+spread        4.03s   slowest/fastest ×1.08
+req/s         0.08
+output tok/s  20.1   (2048 tokens)
+input  tok/s  15.1   (1536 tokens)
+
+cooldown 10s
+
+=== [3/10] run "p128-c8"  in≈128tok out=256tok c=8 n=8 arrival=burst ===
+scenario      p128-c8
+requests      8 total / 8 ok / 0 failed
+wall time     94.00s
+ttft_ms       p50    1366.4  p95    1367.8  p99    1367.9
+itl_ms        p50     312.8  p95     877.6  p99    1075.2
+tpot_ms       p50     363.3  p95     363.3  p99     363.3
+e2e_ms        p50   94000.4  p95   94001.7  p99   94001.8
+stall_ms      p50    1157.4  p95    1157.8  max    1157.8  (per-stream worst gap)
+spread        0.00s   slowest/fastest ×1.00
+req/s         0.09
+output tok/s  21.8   (2048 tokens)
+input  tok/s  16.3   (1536 tokens)
+
+cooldown 10s
+
+=== [4/10] run "p1024-c1"  in≈1024tok out=256tok c=1 n=8 arrival=burst ===
+scenario      p1024-c1
+requests      8 total / 8 ok / 0 failed
+wall time     254.89s
+ttft_ms       p50    6577.1  p95    7467.2  p99    7648.8
+itl_ms        p50      88.0  p95     166.3  p99     925.6
+tpot_ms       p50     108.6  p95     114.4  p99     114.6
+e2e_ms        p50   34328.3  p95   35745.0  p99   35828.4
+stall_ms      p50    1110.9  p95    1403.0  max    1451.4  (per-stream worst gap)
+spread        10.21s   slowest/fastest ×1.40
+req/s         0.03
+output tok/s  8.0   (2048 tokens)
+input  tok/s  34.1   (8704 tokens)
+
+cooldown 10s
+
+=== [5/10] run "p1024-c4"  in≈1024tok out=256tok c=4 n=8 arrival=burst ===
+scenario      p1024-c4
+requests      8 total / 8 ok / 0 failed
+wall time     188.43s
+ttft_ms       p50    1554.5  p95    2379.0  p99    2379.0
+itl_ms        p50     289.8  p95     938.6  p99    1718.9
+tpot_ms       p50     363.4  p95     393.8  p99     393.8
+e2e_ms        p50   94213.6  p95  102788.2  p99  102788.3
+stall_ms      p50    1939.3  p95    2075.7  max    2076.0  (per-stream worst gap)
+spread        17.15s   slowest/fastest ×1.20
+req/s         0.04
+output tok/s  10.9   (2048 tokens)
+input  tok/s  46.2   (8704 tokens)
+
+cooldown 10s
+
+=== [6/10] run "p1024-c8"  in≈1024tok out=256tok c=8 n=8 arrival=burst ===
+scenario      p1024-c8
+requests      8 total / 8 ok / 0 failed
+wall time     112.33s
+ttft_ms       p50    1346.3  p95    1348.7  p99    1348.9
+itl_ms        p50     349.5  p95    1070.7  p99    1846.7
+tpot_ms       p50     435.2  p95     435.2  p99     435.2
+e2e_ms        p50  112331.3  p95  112331.4  p99  112331.4
+stall_ms      p50    2729.1  p95    2730.3  max    2730.4  (per-stream worst gap)
+spread        0.00s   slowest/fastest ×1.00
+req/s         0.07
+output tok/s  18.2   (2048 tokens)
+input  tok/s  77.5   (8704 tokens)
+
+cooldown 10s
+
+=== [7/10] run "p8192-c1"  in≈8192tok out=256tok c=1 n=8 arrival=burst ===
+scenario      p8192-c1
+requests      8 total / 8 ok / 0 failed
+wall time     639.25s
+ttft_ms       p50   51895.5  p95   54183.2  p99   54372.9
+itl_ms        p50      90.1  p95     157.2  p99    1042.0
+tpot_ms       p50     110.6  p95     117.5  p99     119.0
+e2e_ms        p50   80105.9  p95   83368.0  p99   83407.1
+stall_ms      p50    1227.2  p95    1457.3  max    1538.8  (per-stream worst gap)
+spread        10.35s   slowest/fastest ×1.14
+req/s         0.01
+output tok/s  3.2   (2048 tokens)
+input  tok/s  103.3   (66048 tokens)
+
+cooldown 10s
+
+=== [8/10] run "p8192-c4"  in≈8192tok out=256tok c=4 n=8 arrival=burst ===
+scenario      p8192-c4
+requests      8 total / 8 ok / 0 failed
+wall time     216.98s
+ttft_ms       p50    9970.6  p95   15739.5  p99   15739.8
+itl_ms        p50     297.7  p95    1026.1  p99    1986.4
+tpot_ms       p50     386.4  p95     414.3  p99     414.3
+e2e_ms        p50  108487.2  p95  121380.9  p99  121381.4
+stall_ms      p50    2207.9  p95    2380.7  max    2381.0  (per-stream worst gap)
+spread        25.79s   slowest/fastest ×1.27
+req/s         0.04
+output tok/s  9.4   (2048 tokens)
+input  tok/s  304.4   (66048 tokens)
+
+cooldown 10s
+
+=== [9/10] run "p8192-c8"  in≈8192tok out=256tok c=8 n=8 arrival=burst ===
+scenario      p8192-c8
+requests      8 total / 8 ok / 0 failed
+wall time     156.51s
+ttft_ms       p50   18999.8  p95   19007.7  p99   19007.8
+itl_ms        p50     475.8  p95    1223.8  p99    1957.3
+tpot_ms       p50     539.3  p95     539.3  p99     539.3
+e2e_ms        p50  156510.0  p95  156511.9  p99  156511.9
+stall_ms      p50    2545.0  p95    2548.1  max    2548.6  (per-stream worst gap)
+spread        0.00s   slowest/fastest ×1.00
+req/s         0.05
+output tok/s  13.1   (2048 tokens)
+input  tok/s  422.0   (66048 tokens)
+
+
+=== cross-runtime-llama-cpp — summary ===
+run                ok   ttft p50    itl p50    e2e p50 stall max    req/s    tok/s
+p128-c1           8/8       1141         77      27020      1746     0.04     10.2
+p128-c4           8/8        601        169      50931      1008     0.08     20.1
+p128-c8           8/8       1366        313      94000      1158     0.09     21.8
+p1024-c1          8/8       6577         88      34328      1451     0.03      8.0
+p1024-c4          8/8       1555        290      94214      2076     0.04     10.9
+p1024-c8          8/8       1346        349     112331      2730     0.07     18.2
+p8192-c1          8/8      51895         90      80106      1539     0.01      3.2
+p8192-c4          8/8       9971        298     108487      2381     0.04      9.4
+p8192-c8          8/8      19000        476     156510      2549     0.05     13.1
+wrote benchmarks/results/cross-runtime-20260925-004124/llama-cpp/cross-runtime-llama-cpp-20260924-200513/matrix.json
+[harness 02:10:26] llama-cpp [post_benchmark]: healthy (health={'http://127.0.0.1:8085/health': 200, 'http://127.0.0.1:8085/v1/models': 200}, tokens=6, error=None)
+[harness 02:10:27] llama-cpp: stopped
+[harness 02:10:27] llama-cpp: lifecycle written, peak tree RSS 10325 MB

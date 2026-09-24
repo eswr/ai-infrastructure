@@ -194,6 +194,7 @@ class Run:
         self.slowfast = s.get("stream_slowest_fastest_ratio")
         self.req_s = s.get("request_throughput", 0.0)
         self.tok_s = s.get("output_tok_s", 0.0)
+        self.delivered: int = 0  # ok AND ≥1 token; set with stream_tok_s below
         self.stream_tok_s = self._per_stream_tok_s(study_dir / f"{self.name}.json")
 
     def _per_stream_tok_s(self, records_path: Path) -> float | None:
@@ -203,9 +204,16 @@ class Run:
         except (OSError, json.JSONDecodeError):
             return None
         vals = []
+        delivered = 0
         for r in data.get("records", []):
+            # A stream can end "cleanly" with zero tokens when a gateway
+            # watchdog aborts a starved prefill — ok alone lies; delivered
+            # (ok AND ≥1 token) is the honest count.
+            if r.get("ok") and r.get("completion_tokens", 0) > 0:
+                delivered += 1
             if r.get("ok") and r.get("completion_tokens", 0) >= 2 and r.get("e2e_ms"):
                 vals.append(r["completion_tokens"] / (r["e2e_ms"] / 1000.0))
+        self.delivered: int = delivered
         return pctl(vals, 0.5)
 
     def get(self, metric: str, stat: str = "p50") -> float | None:
@@ -311,15 +319,16 @@ def compare(study_path: Path, out_dir: Path | None) -> int:
         "",
         "## Per-run results",
         "",
-        "| runtime | prompt | c | ok | ttft p50 | itl p50 | stall max | spread s | ×sf | tok/s |",
-        "| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| runtime | prompt | c | ok | delivered | ttft p50 | itl p50 | stall max | spread s | ×sf | tok/s |",
+        "| --- | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for name, runs in legs.items():
         for r in sorted(runs, key=lambda r: (r.input_tokens, r.concurrency)):
             stall = r.get("stall", "max")
             md.append(
                 f"| {name} | {tick_label(r.input_tokens)} | {r.concurrency} "
-                f"| {r.ok}/{r.total} | {fmt_ms(r.get('ttft'))} | {fmt_ms(r.get('itl'))} "
+                f"| {r.ok}/{r.total} | {r.delivered} "
+                f"| {fmt_ms(r.get('ttft'))} | {fmt_ms(r.get('itl'))} "
                 f"| {fmt_ms(stall)} | {fmt_num(r.spread_ms and r.spread_ms / 1000)} "
                 f"| {fmt_num(r.slowfast, 2)} | {fmt_num(r.tok_s)} |"
             )
@@ -364,9 +373,13 @@ def compare(study_path: Path, out_dir: Path | None) -> int:
         phases = lc.get("phases", [])
         startup = next((p for p in phases if p["phase"].startswith("wait_functional")), None)
         post = next((p for p in phases if p["phase"] == "post_benchmark"), None)
+        # The post-benchmark verdict is the recovery question ("did the
+        # worst workload break it?"); phases[-1] would show the
+        # post-restart state instead and hide a silent wedge.
+        verdict = (post or phases[-1] if phases else {}).get("verdict", "?")
         md.append(
             f"| {name} | {'ok' if startup and startup.get('ok') else 'FAILED'} "
-            f"| {lc.get('phases', [{}])[-1].get('verdict', '?')} | {short_health(post)} "
+            f"| {verdict} | {short_health(post)} "
             f"| {lc.get('restart_needed', '?')} "
             f"| {fmt_num(lc.get('memory_peak_rss_mb'), 0)} MB "
             f"| {fmt_num(lc.get('memory_peak_footprint_mb'), 0)} MB "
