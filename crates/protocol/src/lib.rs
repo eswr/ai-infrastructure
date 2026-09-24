@@ -115,19 +115,31 @@ pub struct Delta {
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    /// Thinking models (e.g. Qwen3.5) stream generated tokens here instead
-    /// of `content` during the reasoning phase.
+    /// Thinking models stream generated tokens here instead of `content`
+    /// during the reasoning phase — vLLM/MLX dialect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// llama.cpp's dialect for the same thing: Qwen3.5 thinking tokens
+    /// arrive as `reasoning_content`, and missing this field silently
+    /// zero-counts every llama.cpp token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 /// Extract the generated text from a streamed chunk, if any. Reasoning
-/// tokens count too — for latency measurement a token is a token.
+/// tokens count too — for latency measurement a token is a token. Both
+/// reasoning dialects (`reasoning`, `reasoning_content`) count.
 pub fn chunk_text(chunk: &ChatCompletionChunk) -> Option<&str> {
     chunk
         .choices
         .iter()
-        .find_map(|c| c.delta.content.as_deref().or(c.delta.reasoning.as_deref()))
+        .find_map(|c| {
+            c.delta
+                .content
+                .as_deref()
+                .or(c.delta.reasoning.as_deref())
+                .or(c.delta.reasoning_content.as_deref())
+        })
         .filter(|s| !s.is_empty())
 }
 
@@ -183,5 +195,21 @@ mod tests {
                       "choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
         let chunk: ChatCompletionChunk = serde_json::from_str(raw).unwrap();
         assert_eq!(chunk.usage.unwrap().completion_tokens, 5);
+    }
+
+    #[test]
+    fn counts_both_reasoning_dialects() {
+        // llama.cpp streams thinking models as reasoning_content; a chunk
+        // with ONLY that field must still count as a token (this silently
+        // zero-counted every llama.cpp token before the field existed).
+        let raw = r#"{"id":"1","object":"chat.completion.chunk","created":1,"model":"m",
+                      "choices":[{"index":0,"delta":{"reasoning_content":"Thinking"},"finish_reason":null}]}"#;
+        let chunk: ChatCompletionChunk = serde_json::from_str(raw).unwrap();
+        assert_eq!(chunk_text(&chunk), Some("Thinking"));
+
+        // vLLM/MLX dialect.
+        let raw = raw.replace("reasoning_content", "reasoning");
+        let chunk: ChatCompletionChunk = serde_json::from_str(&raw).unwrap();
+        assert_eq!(chunk_text(&chunk), Some("Thinking"));
     }
 }

@@ -78,6 +78,7 @@ class Probe:
     phase: str
     ts: float = field(default_factory=time.time)
     health: dict = field(default_factory=dict)  # path -> {"status": int|None, "body": str}
+    mode: str | None = None  # "sse" | "json" — how the generation actually arrived
     # Functional probe results:
     ok: bool = False
     error: str | None = None
@@ -90,6 +91,7 @@ class Probe:
             "phase": self.phase,
             "ts": self.ts,
             "health": self.health,
+            "mode": self.mode,
             "ok": self.ok,
             "error": self.error,
             "first_event_ms": self.first_event_ms,
@@ -177,9 +179,11 @@ class Runtime(ABC):
         return False
 
     def functional_probe(self, phase: str, max_tokens: int = 4) -> Probe:
-        """Tiny real generation over SSE — the only health signal that
-        can't lie. Any streamed data event counts as a token; a reasoning
-        delta is a token (Qwen3.5 thinks before it speaks)."""
+        """Tiny real generation — the only health signal that can't lie.
+        Accepts both streaming SSE (any data event = a token; a reasoning
+        delta is a token) and a JSON body: vllm-metal 0.1.0 ignores
+        `stream: true` and answers complete JSON, which still proves the
+        runtime generates — it just can't stream, and that is recorded."""
         p = Probe(phase=phase)
         for path in self.health_urls():
             status, body = http_get(path)
@@ -200,22 +204,32 @@ class Runtime(ABC):
                     p.error = f"http {resp.status}"
                     p.total_ms = (time.time() - t0) * 1000
                     return p
-                for raw in resp:
-                    line = raw.decode("utf-8", "replace").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        continue
-                    if p.first_event_ms is None:
-                        p.first_event_ms = (time.time() - t0) * 1000
-                    p.tokens += 1
-            p.ok = p.tokens > 0
-            if not p.ok:
-                p.error = "stream ended without any data event"
+                ctype = resp.headers.get("content-type", "")
+                if "text/event-stream" in ctype:
+                    p.mode = "sse"
+                    for raw in resp:
+                        line = raw.decode("utf-8", "replace").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            continue
+                        if p.first_event_ms is None:
+                            p.first_event_ms = (time.time() - t0) * 1000
+                        p.tokens += 1
+                    if p.tokens == 0:
+                        p.error = "stream ended without any data event"
+                else:
+                    p.mode = "json"  # runtime declined to stream
+                    body = json.loads(resp.read().decode("utf-8", "replace"))
+                    p.tokens = int(body.get("usage", {}).get("completion_tokens", 0))
+                    p.first_event_ms = p.total_ms = (time.time() - t0) * 1000
+                    if p.tokens == 0:
+                        p.error = "json response carried no completion tokens"
+            p.ok = p.error is None and p.tokens > 0
         except Exception as e:
             p.error = f"{type(e).__name__}: {e}"
-        p.total_ms = (time.time() - t0) * 1000
+        p.total_ms = p.total_ms or (time.time() - t0) * 1000
         return p
 
     def wait_functional(self, timeout_s: float) -> Probe:
@@ -299,7 +313,11 @@ class MlxLmRuntime(Runtime):
 
 
 class LlamaCppRuntime(Runtime):
-    def __init__(self, gguf: str | None = None, port: int = 8085, ctx: int = 73_728, parallel: int = 8):
+    def __init__(self, gguf: str | None = None, port: int = 8085, ctx: int = 98_304, parallel: int = 8):
+        # ctx 98304 = 8 slots x 12,288: the nominal "8192-token" scenario
+        # prompt tokenizes to ~11.4k real tokens (client estimator vs
+        # Qwen tokenizer divergence, known since phase 3), and llama.cpp
+        # refuses requests larger than the slot instead of truncating.
         self.gguf = gguf or find_qwen35_gguf()
         if not self.gguf:
             raise SystemExit("no Qwen3.5-9B GGUF in the HF cache; run: hf download unsloth/Qwen3.5-9B-GGUF Qwen3.5-9B-Q4_K_M.gguf")

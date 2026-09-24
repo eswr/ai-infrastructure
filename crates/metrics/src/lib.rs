@@ -28,6 +28,9 @@ pub struct RequestRecord {
     pub prompt_tokens: Option<u64>,
     /// Generated tokens counted client-side (≈ streamed content chunks).
     pub completion_tokens: u64,
+    /// True when the runtime answered JSON to a stream request (no SSE):
+    /// the whole generation arrived at once and TTFT == E2E by construction.
+    pub non_streamed: bool,
 }
 
 impl RequestRecord {

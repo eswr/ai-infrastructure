@@ -413,6 +413,7 @@ fn write_run_artifacts(base: &str, summary: &Summary, records: &[RequestRecord])
                 "completion_tokens": r.completion_tokens,
                 "prompt_tokens": r.prompt_tokens,
                 "token_ts_ms": r.token_ts_ms,
+                "non_streamed": r.non_streamed,
                 "itl_p50_ms": (!gaps.is_empty()).then(|| percentile(&gaps, 0.50)),
                 "itl_p95_ms": (!gaps.is_empty()).then(|| percentile(&gaps, 0.95)),
                 "itl_p99_ms": (!gaps.is_empty()).then(|| percentile(&gaps, 0.99)),
@@ -507,7 +508,42 @@ async fn run_one(client: &reqwest::Client, scenario: &Scenario, id: usize) -> Re
         return record;
     }
 
-    // Streaming: parse SSE, timestamp every content chunk.
+    // Streaming: parse SSE, timestamp every content chunk. But if the
+    // runtime answered JSON to a stream request (vllm-metal 0.1.0 ignores
+    // `stream: true`), the whole generation lands at once — the honest
+    // client view is first byte = last byte: no ITL, TTFT = E2E, and the
+    // record is flagged so analysis never mistakes it for streaming.
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|c| c.starts_with("text/event-stream"))
+        .unwrap_or(true);
+    if !content_type {
+        match resp.json::<serde_json::Value>().await {
+            Ok(v) => {
+                if let Some(usage) = v.get("usage") {
+                    let pt = usage.get("prompt_tokens").and_then(|x| x.as_u64());
+                    let ct = usage.get("completion_tokens").and_then(|x| x.as_u64());
+                    if let Some(pt) = pt {
+                        record.prompt_tokens = Some(pt);
+                    }
+                    if let Some(ct) = ct {
+                        record.completion_tokens = ct;
+                    }
+                }
+                let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                record.ttft_ms = Some(ms);
+                record.token_ts_ms = vec![ms];
+                record.e2e_ms = Some(ms);
+                record.non_streamed = true;
+                record.ok = true;
+            }
+            Err(e) => record.fail(format!("decode non-streamed body: {e}")),
+        }
+        return record;
+    }
+
     let mut parser = SseParser::new();
     let mut stream = resp.bytes_stream();
     loop {

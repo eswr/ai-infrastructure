@@ -385,6 +385,15 @@ async fn chat_completions(
             "application/json"
         }));
 
+    // A runtime that answers JSON to a streaming request has declined to
+    // stream (vllm-metal 0.1.0 does). Treat the body as non-streaming so
+    // usage parses, and forward the honest content-type to the client.
+    let upstream_streams = content_type
+        .to_str()
+        .map(|c| c.starts_with("text/event-stream"))
+        .unwrap_or(!stream_mode);
+    let stream_mode = stream_mode && upstream_streams;
+
     let ctx = StreamCtx {
         metrics: st.metrics.clone(),
         worker: worker.clone(),
