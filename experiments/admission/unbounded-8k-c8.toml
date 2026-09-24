@@ -1,0 +1,16 @@
+# Run A — reproduce the phase-2 pathological workload with admission
+# control DISABLED (all ADMIT_* budgets unset). Expectation from phase 2:
+# mlx_lm.server accepts all 8 concurrent 8K prompts, time-slices prefill,
+# and no request produces a first token within the client timeout.
+name = "unbounded-8k-c8"
+endpoint = "http://127.0.0.1:8080"
+model = "mlx-community/Qwen3.5-9B-4bit"
+concurrency = 8
+num_requests = 16
+input_tokens = 8192
+output_tokens = 256
+stream = true
+shared_prefix_tokens = 0
+arrival = "burst"
+timeout_s = 900
+seed = 42

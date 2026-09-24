@@ -1,0 +1,15 @@
+loadgen → http://127.0.0.1:8080  model=mlx-community/Qwen3.5-9B-4bit  stream=true  requests=16  concurrency=8  in≈8192tok  out=256tok
+
+scenario      admission-controlled-8k-c8
+requests      16 total / 16 ok / 0 failed
+wall time     786.16s
+ttft_ms       p50  364979.2  p95  416922.8  p99  417017.7
+itl_ms        p50      63.7  p95      84.0  p99     119.0
+tpot_ms       p50      66.6  p95      72.2  p99      74.9
+e2e_ms        p50  381982.3  p95  433586.0  p99  433948.8
+req/s         0.02
+output tok/s  5.2   (4066 tokens)
+input  tok/s  168.0   (132096 tokens)
+
+wrote benchmarks/results/admission-saturation-20260924-214429/admission-controlled-8k-c8-20260924-165756.json
+wrote benchmarks/results/admission-saturation-20260924-214429/admission-controlled-8k-c8-20260924-165756.csv

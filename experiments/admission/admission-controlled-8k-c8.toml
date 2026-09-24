@@ -1,0 +1,19 @@
+# Run B — the identical workload with admission control ENABLED
+# (ADMIT_MAX_ACTIVE_INPUT_TOKENS=8192, ADMIT_OVERLOADED_QUEUE_S=1200 in
+# the gateway env, set by run.sh). Identical otherwise. Expectation:
+# 8K-token budget admits one prefill at a time, the rest queue in
+# token-accounted order, every request gets a finite first token, and the
+# worker never collapses. Client timeout is generous because queue waits
+# are the point (worst case ~16 × 65 s ≈ 17 min).
+name = "admission-controlled-8k-c8"
+endpoint = "http://127.0.0.1:8080"
+model = "mlx-community/Qwen3.5-9B-4bit"
+concurrency = 8
+num_requests = 16
+input_tokens = 8192
+output_tokens = 256
+stream = true
+shared_prefix_tokens = 0
+arrival = "burst"
+timeout_s = 2400
+seed = 42

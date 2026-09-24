@@ -1,0 +1,16 @@
+loadgen → http://127.0.0.1:8080  model=mlx-community/Qwen3.5-9B-4bit  stream=true  requests=16  concurrency=8  in≈8192tok  out=256tok
+
+scenario      unbounded-8k-c8
+requests      16 total / 0 ok / 16 failed
+wall time     1800.02s
+ttft_ms       n/a
+itl_ms        n/a
+tpot_ms       n/a
+e2e_ms        p50  900008.8  p95  900008.8  p99  900008.8
+req/s         0.00
+output tok/s  0.0   (0 tokens)
+input  tok/s  73.4   (132096 tokens)
+
+wrote benchmarks/results/admission-saturation-20260924-214429/unbounded-8k-c8-20260924-164429.json
+wrote benchmarks/results/admission-saturation-20260924-214429/unbounded-8k-c8-20260924-164429.csv
+note: 16 request(s) failed
