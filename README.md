@@ -17,8 +17,9 @@ maps to what.
 ## Quickstart
 
 ```bash
-brew install llama.cpp                     # once
-cargo build --workspace && cargo test      # Rust gateway + loadgen
+brew install llama.cpp                     # once (optional; mock worker needs nothing)
+make setup                                 # toolchain checks + workspace build
+cargo test                                 # Rust gateway + loadgen
 
 make up                                    # Prometheus/Grafana/Tempo/Loki/OTel
 #   → Grafana http://localhost:3000  Prometheus http://localhost:9090
@@ -32,9 +33,10 @@ make gateway                               # terminal 3
 make matrix MATRIX=mlx-prompt-concurrency  # terminal 1: 16 measured runs
 make analyze STUDY=<results dir printed>   # tables + SVG charts
 
-# the centerpiece experiment: the phase-2 saturation collapse (8K×c8),
-# unbounded vs admission-controlled (see docs/results/admission-saturation.md)
-bash experiments/admission/run.sh
+# the centerpiece experiment: the 8K×c8 saturation collapse, unbounded vs
+# admission-controlled (~55 min, real GPU; docs/results/admission-saturation.md).
+# Artifacts land in benchmarks/results/<study>/ with a provenance manifest.
+make experiment-admission-saturation
 
 # automated failure-injection suite (mock worker, no GPU needed)
 make failcheck
@@ -105,7 +107,10 @@ docs/          architecture · benchmark-methodology · failure-testing ·
 - [x] Adaptive ECT scheduling + worker health
 - [x] Admission control: work-budgeted queueing, overload 429, cancellation
 - [x] Failure-injection suite (`make failcheck`)
-- [ ] Admission-vs-unbounded saturation study writeup (experiment in flight)
+- [x] Admission-vs-unbounded saturation study (docs/results/admission-saturation.md):
+      0/16 unbounded vs 16/16 admission-controlled — tag `phase-3-admission-control`
+- [x] Experiment provenance manifests (benchmarks/manifest.py): git/machine/mlx/model
+      quant + exact args, written next to every experiment's artifacts
 - [ ] vLLM-Metal benchmarks (needs `uv sync` in workers/vllm-metal)
 - [ ] Cross-runtime comparison at matched model size (9B GGUF/MLX/vLLM)
 - [ ] k3d control-plane simulation, fake accelerator node labels

@@ -13,7 +13,13 @@ cd "$(dirname "$0")/../.."
 MODEL="mlx-community/Qwen3.5-9B-4bit"
 GW_PID=""
 MLX_PID=""
+OUT=""
 cleanup() {
+  # Stamp the manifest even on mid-experiment failure: run A wedging the
+  # worker is a legitimate outcome and its artifacts must keep provenance.
+  if [ -n "$OUT" ]; then
+    python3 benchmarks/manifest.py finalize --out "$OUT" 2>/dev/null || true
+  fi
   [ -n "$GW_PID" ] && kill "$GW_PID" 2>/dev/null || true
   if [ "${KEEP_MLX:-0}" != "1" ] && [ -n "$MLX_PID" ]; then
     kill "$MLX_PID" 2>/dev/null || true
@@ -58,7 +64,36 @@ OUT="benchmarks/results/admission-saturation-$TS"
 # worker log lives inside the artifacts dir once it exists
 mkdir -p "$OUT"
 MLX_LOG="$OUT/worker-mlx.log"
-mkdir -p "$OUT"
+
+# Provenance manifest: environment snapshot (git/OS/machine/mlx/model quant)
+# plus this experiment's exact args. finalize runs from the EXIT trap.
+cat > "$OUT/experiment.json" <<EOF
+{
+  "model": "$MODEL",
+  "worker": {
+    "runtime": "mlx_lm.server",
+    "cmd": "python3 -m mlx_lm.server --model $MODEL --port 8082",
+    "restart_between_runs": true,
+    "post_probe_before_trusting_health": true
+  },
+  "gateway": {
+    "route_policy": "lor",
+    "runs": {
+      "A": {"admission": false, "scenario": "experiments/admission/unbounded-8k-c8.toml",
+            "gateway_env": {}},
+      "B": {"admission": true, "scenario": "experiments/admission/admission-controlled-8k-c8.toml",
+            "gateway_env": {"ADMIT_MAX_ACTIVE_INPUT_TOKENS": "8192",
+                            "ADMIT_OVERLOADED_QUEUE_S": "1200",
+                            "ADMIT_DEGRADED_QUEUE_S": "300"}}
+    }
+  },
+  "workload": {"input_tokens": 8192, "output_tokens": 256, "concurrency": 8,
+               "num_requests": 16, "arrival": "burst", "stream": true,
+               "shared_prefix_tokens": 0, "seed": 42}
+}
+EOF
+python3 benchmarks/manifest.py write --out "$OUT" --experiment admission-saturation \
+  --fragment "$OUT/experiment.json"
 
 start_gateway() {  # $1 = extra env assignments
   env GATEWAY_ADDR=0.0.0.0:8080 \

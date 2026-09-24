@@ -2,12 +2,24 @@ SHELL := /bin/bash
 SCENARIO ?= smoke
 MATRIX ?= mlx-prompt-concurrency
 
-.PHONY: build test fmt clippy bench matrix analyze failcheck \
+.PHONY: setup build build-release test fmt clippy bench matrix analyze failcheck \
+        experiment-admission-saturation \
         worker-mlx worker-llama worker-vllm worker-mock gateway \
         up down obs-logs k8s
 
+setup:            ## fresh-checkout bootstrap: toolchain checks + workspace build
+	@command -v cargo >/dev/null 2>&1 || { echo "ERROR: rust not found — install via https://rustup.rs"; exit 1; }
+	cargo --version
+	python3 --version
+	@docker info >/dev/null 2>&1 && echo "docker: ok" || echo "WARNING: docker not running — 'make up' will fail"
+	@command -v llama-server >/dev/null 2>&1 && echo "llama.cpp: ok" || echo "note: llama.cpp not found (optional; brew install llama.cpp)"
+	cargo build --workspace
+
 build:
 	cargo build --workspace
+
+build-release: ## release profile — what failcheck and the experiments actually run
+	cargo build --release --workspace
 
 test:
 	cargo test --workspace
@@ -51,8 +63,11 @@ analyze:          ## tables + charts for make analyze STUDY=<results dir name>
 smoke:           ## start the cached 9B-4bit MLX model on :8082 (loads in seconds)
 	bash workers/mlx-lm/run.sh
 
-failcheck: build  ## automated failure-injection suite against the mock worker
+failcheck: build-release  ## automated failure-injection suite against the mock worker
 	python3 benchmarks/failures/run_suite.py
+
+experiment-admission-saturation: build-release ## the centerpiece A/B: unbounded vs admission-controlled 8K×c8 (~55 min, real GPU)
+	bash experiments/admission/run.sh
 
 # -------------------------------------------------------- observability --
 
