@@ -189,6 +189,9 @@ class Run:
         self.itl = s.get("itl_ms") or {}
         self.tpot = s.get("tpot_ms") or {}
         self.e2e = s.get("e2e_ms") or {}
+        self.stall = s.get("stream_max_stall_ms") or {}
+        self.spread_ms = s.get("stream_completion_spread_ms")
+        self.slowfast = s.get("stream_slowest_fastest_ratio")
         self.req_s = s.get("request_throughput", 0.0)
         self.tok_s = s.get("output_tok_s", 0.0)
         self.stream_tok_s = self._per_stream_tok_s(study_dir / f"{self.name}.json")
@@ -206,9 +209,35 @@ class Run:
         return pctl(vals, 0.5)
 
     def get(self, metric: str, stat: str = "p50") -> float | None:
-        block = {"ttft": self.ttft, "itl": self.itl, "tpot": self.tpot, "e2e": self.e2e}[metric]
+        block = {
+            "ttft": self.ttft, "itl": self.itl, "tpot": self.tpot,
+            "e2e": self.e2e, "stall": self.stall,
+        }[metric]
         v = block.get(stat)
         return float(v) if v is not None else None
+
+
+def fairness_table(runs: list[Run]) -> str:
+    """Completion spread (s) and slowest/fastest ratio per cell."""
+    prompts = sorted({r.input_tokens for r in runs})
+    concs = sorted({r.concurrency for r in runs})
+    by = {(r.input_tokens, r.concurrency): r for r in runs}
+    lines = [
+        "| c\\prompt | " + " | ".join(f"{tick_label(p)} spread s / ×sf" for p in prompts) + " |",
+        "| --- | " + " | ".join("---:" for _ in prompts) + " |",
+    ]
+    for c in concs:
+        cells = []
+        for p in prompts:
+            r = by.get((p, c))
+            if r is None:
+                cells.append("n/a")
+                continue
+            sp = f"{r.spread_ms / 1000:.1f}" if r.spread_ms is not None else "n/a"
+            sf = f"×{r.slowfast:.2f}" if r.slowfast is not None else "n/a"
+            cells.append(f"{sp} / {sf}")
+        lines.append(f"| {c} | " + " | ".join(cells) + " |")
+    return "\n".join(lines)
 
 
 def table(runs: list[Run], metric: str, stat: str = "p50", unit: str = "ms") -> str:
@@ -228,12 +257,172 @@ def table(runs: list[Run], metric: str, stat: str = "p50", unit: str = "ms") -> 
     return "\n".join(lines)
 
 
+# --------------------------------------------------------- cross-runtime --
+
+def linfit(pts: list[tuple[float, float]]) -> tuple[float, float] | None:
+    """Least-squares (intercept, slope) — the TTFT ≈ fixed + rate×prompt fit."""
+    n = len(pts)
+    if n < 2:
+        return None
+    sx = sum(x for x, _ in pts)
+    sy = sum(y for _, y in pts)
+    sxx = sum(x * x for x, _ in pts)
+    sxy = sum(x * y for x, y in pts)
+    den = n * sxx - sx * sx
+    if den == 0:
+        return None
+    slope = (n * sxy - sx * sy) / den
+    return (sy - slope * sx) / n, slope
+
+
+def short_health(probe: dict | None) -> str:
+    """'/health: 200 /v1/models: 200' from a probe record's health dict."""
+    if not probe:
+        return "n/a"
+    parts = []
+    for path, h in probe.get("health", {}).items():
+        seg = path.rsplit("/", 1)[-1] or path
+        parts.append(f"{seg}: {h.get('status')}")
+    mode = probe.get("mode")
+    return " ".join(parts) + (f" (mode={mode})" if mode else "")
+
+
+def compare(study_path: Path, out_dir: Path | None) -> int:
+    """Analyze a merged cross-runtime.json (runtime_harness.py merge)."""
+    data = json.loads(study_path.read_text())
+    study_dir = study_path.parent
+    out = out_dir or study_dir / "analysis"
+    out.mkdir(parents=True, exist_ok=True)
+
+    legs: dict[str, list[Run]] = {}
+    for name, entry in data.get("runtimes", {}).items():
+        if "rows" not in entry:
+            continue
+        leg_dir = Path(entry["matrix_json"]).parent if entry.get("matrix_json") else study_dir / name
+        legs[name] = [Run(row, leg_dir) for row in entry["rows"] if not row.get("warmup")]
+    if not legs:
+        print("no legs with rows in", study_path, file=sys.stderr)
+        return 1
+
+    md: list[str] = [
+        f"# Cross-runtime comparison — {data.get('study', '?')}",
+        "",
+        f"- created: `{data.get('created', '?')}` | legs: {', '.join(legs)}",
+        "",
+        "## Per-run results",
+        "",
+        "| runtime | prompt | c | ok | ttft p50 | itl p50 | stall max | spread s | ×sf | tok/s |",
+        "| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for name, runs in legs.items():
+        for r in sorted(runs, key=lambda r: (r.input_tokens, r.concurrency)):
+            stall = r.get("stall", "max")
+            md.append(
+                f"| {name} | {tick_label(r.input_tokens)} | {r.concurrency} "
+                f"| {r.ok}/{r.total} | {fmt_ms(r.get('ttft'))} | {fmt_ms(r.get('itl'))} "
+                f"| {fmt_ms(stall)} | {fmt_num(r.spread_ms and r.spread_ms / 1000)} "
+                f"| {fmt_num(r.slowfast, 2)} | {fmt_num(r.tok_s)} |"
+            )
+
+    # Prefill scaling: TTFT ≈ fixed + rate × prompt, fit at c=1.
+    md += ["", "## Prefill scaling (c=1 fit: TTFT ≈ fixed + rate × prompt)", "",
+           "| runtime | fixed (s) | rate (ms/tok) | points |", "| --- | ---: | ---: | --- |"]
+    fits: dict[str, tuple[float, float] | None] = {}
+    for name, runs in legs.items():
+        pts = [(float(r.input_tokens), r.get("ttft")) for r in runs
+               if r.concurrency == 1 and r.get("ttft") is not None]
+        fits[name] = linfit(pts)
+        fixed, rate = fits[name] if fits[name] else (None, None)
+        md.append(f"| {name} | {fmt_num(fixed and fixed / 1000, 2)} "
+                  f"| {fmt_num(rate, 2)} | {len(pts)} |")
+
+    # Concurrency scaling: what c=8 buys and costs vs c=1.
+    md += ["", "## Concurrency scaling (c8 vs c1 per prompt)", "",
+           "| runtime | prompt | tok/s ×c8/c1 | TTFT ×c8/c1 | stall max c8 |",]
+    for name, runs in legs.items():
+        by = {(r.input_tokens, r.concurrency): r for r in runs}
+        for p in sorted({r.input_tokens for r in runs}):
+            r1, r8 = by.get((p, 1)), by.get((p, 8))
+            if not r1 or not r8:
+                continue
+            tps = (r8.tok_s / r1.tok_s) if r1.tok_s else None
+            t1, t8 = r1.get("ttft"), r8.get("ttft")
+            ttft = (t8 / t1) if (t1 and t8) else None
+            md.append(f"| {name} | {tick_label(p)} | {fmt_num(tps, 2)} "
+                      f"| {fmt_num(ttft, 2)} | {fmt_ms(r8.get('stall', 'max'))} |")
+
+    # Lifecycle / recovery / memory.
+    md += ["", "## Lifecycle, recovery and memory (from runtime_harness.py)", "",
+           "| runtime | startup gen | post-benchmark verdict | /health said | restart needed "
+           "| peak tree RSS | peak footprint | peak sys used |",
+           "| --- | --- | --- | --- | --- | ---: | ---: | ---: |"]
+    for name, entry in data.get("runtimes", {}).items():
+        lc = entry.get("lifecycle")
+        if not lc:
+            md.append(f"| {name} | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
+            continue
+        phases = lc.get("phases", [])
+        startup = next((p for p in phases if p["phase"].startswith("wait_functional")), None)
+        post = next((p for p in phases if p["phase"] == "post_benchmark"), None)
+        md.append(
+            f"| {name} | {'ok' if startup and startup.get('ok') else 'FAILED'} "
+            f"| {lc.get('phases', [{}])[-1].get('verdict', '?')} | {short_health(post)} "
+            f"| {lc.get('restart_needed', '?')} "
+            f"| {fmt_num(lc.get('memory_peak_rss_mb'), 0)} MB "
+            f"| {fmt_num(lc.get('memory_peak_footprint_mb'), 0)} MB "
+            f"| {fmt_num(lc.get('memory_peak_sys_used_mb'), 0)} MB |"
+        )
+
+    # Charts: the money chart is throughput vs concurrency, one per prompt,
+    # with a runtime per series; plus TTFT knee, ITL and stall views.
+    prompts = sorted({r.input_tokens for runs in legs.values() for r in runs})
+    for p in prompts:
+        line_chart(out / f"throughput-vs-concurrency-p{p}.svg",
+                   f"Aggregate output tok/s vs concurrency — prompt {tick_label(p)}",
+                   "concurrency", "output tok/s",
+                   [(name, {float(r.concurrency): r.tok_s for r in runs if r.input_tokens == p})
+                    for name, runs in legs.items()])
+        line_chart(out / f"ttft-vs-concurrency-p{p}.svg",
+                   f"TTFT p50 vs concurrency — prompt {tick_label(p)}",
+                   "concurrency", "TTFT p50 (ms, log)",
+                   [(name, {float(r.concurrency): r.get("ttft") for r in runs if r.input_tokens == p})
+                    for name, runs in legs.items()], log_y=True)
+        line_chart(out / f"itl-vs-concurrency-p{p}.svg",
+                   f"ITL p50 vs concurrency — prompt {tick_label(p)}",
+                   "concurrency", "ITL p50 (ms)",
+                   [(name, {float(r.concurrency): r.get("itl") for r in runs if r.input_tokens == p})
+                    for name, runs in legs.items()])
+        line_chart(out / f"max-stall-vs-concurrency-p{p}.svg",
+                   f"Worst per-stream stall vs concurrency — prompt {tick_label(p)}",
+                   "concurrency", "max stall (ms, log)",
+                   [(name, {float(r.concurrency): r.get("stall", "max") for r in runs if r.input_tokens == p})
+                    for name, runs in legs.items()], log_y=True)
+    line_chart(out / "ttft-vs-prompt-c1.svg",
+               "Prefill scaling — TTFT p50 vs prompt at c=1",
+               "prompt tokens (log)", "TTFT p50 (ms, log)",
+               [(name, {float(r.input_tokens): r.get("ttft") for r in runs if r.concurrency == 1})
+                for name, runs in legs.items()], log_x=True, log_y=True)
+
+    (out / "cross-runtime-tables.md").write_text("\n".join(md) + "\n")
+    print(f"wrote {out}/cross-runtime-tables.md and {len(list(out.glob('*.svg')))} charts")
+    print("\n".join(md[:14]))
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("matrix_json", type=Path)
+    ap.add_argument("matrix_json", type=Path, nargs="?",
+                    help="matrix.json from `loadgen --matrix`")
+    ap.add_argument("--compare", type=Path, default=None,
+                    help="merged cross-runtime.json: compare legs instead")
     ap.add_argument("--out-dir", type=Path, default=None,
                     help="default: <study dir>/analysis")
     args = ap.parse_args()
+
+    if args.compare:
+        return compare(args.compare, args.out_dir)
+    if args.matrix_json is None:
+        ap.error("need a matrix_json path or --compare cross-runtime.json")
 
     data = json.loads(args.matrix_json.read_text())
     study_dir = args.matrix_json.parent
@@ -275,6 +464,14 @@ def main() -> int:
         "## E2E p50 (ms)",
         "",
         table(runs, "e2e"),
+        "",
+        "## Max per-stream stall (ms) — worst gap any single stream sat through",
+        "",
+        table(runs, "stall"),
+        "",
+        "## Stream fairness — completion spread and slowest/fastest ratio",
+        "",
+        fairness_table(runs),
         "",
         "## Throughput",
         "",
