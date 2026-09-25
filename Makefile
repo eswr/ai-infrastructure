@@ -2,7 +2,7 @@ SHELL := /bin/bash
 SCENARIO ?= smoke
 MATRIX ?= mlx-prompt-concurrency
 
-.PHONY: setup build build-release test fmt clippy bench matrix analyze failcheck \
+.PHONY: setup build build-release test fmt clippy bench matrix analyze failcheck lifecycle-check \
         experiment-admission-saturation experiment-cross-runtime \
         worker-mlx worker-llama worker-vllm worker-mock gateway \
         up down obs-logs k8s
@@ -65,6 +65,9 @@ smoke:           ## start the cached 9B-4bit MLX model on :8082 (loads in second
 
 failcheck: build-release  ## automated failure-injection suite against the mock worker
 	python3 benchmarks/failures/run_suite.py
+
+lifecycle-check: build-release ## the six worker-lifecycle scenarios (wedge, connect, empty, stall, restart, drain)
+	python3 benchmarks/lifecycle/run_lifecycle_check.py
 
 experiment-admission-saturation: build-release ## the centerpiece A/B: unbounded vs admission-controlled 8K×c8 (~55 min, real GPU)
 	bash experiments/admission/run.sh

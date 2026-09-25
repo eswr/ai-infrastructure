@@ -46,12 +46,14 @@
 | --- | --- | --- |
 | `apps/gateway` | Rust, Axum | OpenAI-compatible edge: token estimation → admission control → scheduling → instrumented streaming proxy; OTel traces/logs; Prometheus metrics |
 | `apps/loadgen` | Rust, Tokio/reqwest | Open-loop arrivals + closed-loop concurrency cap; client-side TTFT/ITL/TPOT/E2E; JSON+CSV artifacts; matrix runner |
-| `crates/scheduler` | Rust | worker registry + online service-time model (EWMA prefill regression, decode EWMA); routing policies; health tracking |
+| `crates/scheduler` | Rust | worker registry + online service-time model (EWMA prefill regression, decode EWMA); routing policies; lifecycle-backed traffic gating |
+| `crates/worker-lifecycle` | Rust | worker health state machine: four health dimensions, per-reason escalation, recovery hysteresis, generation epochs (phase 4D) |
 | `crates/streaming` | Rust | incremental SSE parser (spec-correct across chunk boundaries) |
 | `crates/metrics` | Rust | request records → percentiles/throughput aggregation |
 | `crates/workload` | Rust | scenario TOMLs, deterministic prompt synthesis, arrival processes |
 | `workers/*` | Python / C++ | native macOS model servers (MLX-LM, vLLM-Metal, llama.cpp) + dependency-free mock |
 | `benchmarks/failures` | Python | automated failure-injection suite (`make failcheck`) |
+| `benchmarks/lifecycle` | Python | the six worker-lifecycle acceptance scenarios (`make lifecycle-check`) |
 | `deploy/compose` | Docker | OTel Collector, Prometheus, Tempo, Loki, Grafana (provisioned dashboard) |
 
 ## The gateway request path
@@ -117,6 +119,67 @@ admission work estimates. The scheduler therefore gets smarter about
 *this machine* as it serves traffic — no hard-coded constants survive
 contact with a new runtime or quantization.
 
+### Worker lifecycle (phase 4D)
+
+The phase-4A runtime study proved that `process alive ≠ serving traffic`:
+a wedged mlx_lm.server answered `/health` with 200 for hours while never
+serving another POST, and vllm-metal answered HTTP 200 with zero generated
+tokens. A single up/down boolean cannot express those, so each worker
+carries a state machine (`crates/worker-lifecycle`, shared vocabulary with
+the benchmark harness) over **four independent health dimensions**:
+
+| dimension | question | probed by |
+| --- | --- | --- |
+| `process` | is the OS process alive | external actor report |
+| `transport` | does the endpoint accept and answer | `/health` poll + dispatches |
+| `functional` | does a tiny real generation produce tokens | functional probe |
+| `semantic` | does a completed request carry non-empty output | token counts on real traffic |
+
+States: `STARTING → WARMING → READY`, `DEGRADED` (one strike, still
+serving), `UNHEALTHY` (quarantined), `RECOVERING → WARMING` after a
+restart, and `DRAINING → STOPPED` for deliberate retirement. Only READY
+and DEGRADED receive traffic; **`GET /health = 200` is never sufficient
+to declare READY** — the functional probe ("Reply with: OK", 2 tokens,
+temperature 0) is the gate, judged on HTTP success ∧ valid payload ∧
+`completion_tokens > 0` ∧ non-empty output.
+
+Escalation is per failure *reason*, because the classes are not equally
+trustworthy:
+
+```text
+immediate (quarantine on first sighting):
+    PROCESS_EXITED · FUNCTIONAL_PROBE_TIMEOUT (the wedge signal) · MEMORY_PRESSURE
+
+accumulating (1 → DEGRADED, 3 consecutive → UNHEALTHY):
+    CONNECT_FAILED · EMPTY_COMPLETION · STREAM_STALLED · FIRST_TOKEN_TIMEOUT · MALFORMED_RESPONSE
+```
+
+Request-path first-token timeouts accumulate rather than quarantine
+immediately because the watchdog threshold is deployment policy and can
+misfire on a legitimately slow 8K-prompt worker; a *functional probe*
+timeout is a controlled wedge probe and is trusted instantly. Hysteresis
+works both directions (`UNHEALTHY` after 3 accumulating failures;
+`recover_probes = 2` consecutive passes to leave WARMING after a
+restart), so workers flap neither into nor out of quarantine. When a
+restarted incarnation starts warming, its **generation epoch** increments
+(`mlx-01/gen-7` wedging and `mlx-01/gen-8` serving are distinct workers
+in telemetry, never one healthy-looking continuum).
+
+The gateway does not restart native processes — it quarantines and keeps
+probing; the harness (and later Kubernetes) is the restart actor, which
+drives `RECOVERING → WARMING → READY` purely through observed evidence.
+Failure surfaces wired into the machine: dispatch connect/5xx (transport),
+first-token watchdog (functional), mid-stream stall watchdog
+(`STREAM_STALL_TIMEOUT_S`, functional), zero-token completions (semantic —
+`inference_empty_completions_total`), functional probe results, and
+`/health` (transport only). Admin surface: `POST
+/admin/workers/{id}/drain` (finish in-flight, accept nothing new, STOPPED
+at zero outstanding) and `POST /admin/workers/{id}/probe` (one probe now).
+
+For measured benchmark runs set `FUNCTIONAL_PROBE_INTERVAL_READY_S=0`
+(the harness does): steady-state probing is real GPU work. Startup gating
+and failure escalation stay fully active.
+
 ## Design rules
 
 1. **Model processes stay native on macOS.** Metal/unified-memory access is
@@ -151,7 +214,20 @@ client disconnect (queued request, HTTP/2 reset)
 
 worker silent (no first token)
        ↓ watchdog timer (tokio::time::Sleep fused into the stream poll)
-       ↓ FirstTokenTimeout → capacity released, worker failure counted
+       ↓ FirstTokenTimeout → capacity released, functional failure recorded
+       ↓ lifecycle: accumulating — 1 strike DEGRADED, 3 consecutive UNHEALTHY
+
+worker stalls mid-stream (STREAM_STALL_TIMEOUT_S)
+       ↓ re-armed per-token watchdog fires on token silence
+       ↓ StreamStalled → capacity released, functional failure recorded
+
+worker answers HTTP 200 with zero tokens
+       ↓ gateway counts output tokens; clean stream + 0 tokens is a failure
+       ↓ empty_completions_total, semantic-dimension failure recorded
+
+worker quarantined (UNHEALTHY)
+       ↓ lifecycle: no new assignments; transport + functional probes continue
+       ↓ signs of life → RECOVERING → WARMING (generation++) → READY
 ```
 
 No tokens are generated for nobody, and no slot is held forever.

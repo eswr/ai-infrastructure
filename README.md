@@ -40,6 +40,10 @@ make experiment-admission-saturation
 
 # automated failure-injection suite (mock worker, no GPU needed)
 make failcheck
+
+# the six worker-lifecycle acceptance scenarios: silent wedge, connection
+# failure, empty completion, mid-stream stall, restart/recovery, drain
+make lifecycle-check
 ```
 
 Swap workers freely — they all speak the OpenAI API on known ports:
@@ -111,6 +115,9 @@ docs/          architecture · benchmark-methodology · failure-testing ·
       0/16 unbounded vs 16/16 admission-controlled — tag `phase-3-admission-control`
 - [x] Experiment provenance manifests (benchmarks/manifest.py): git/machine/mlx/model
       quant + exact args, written next to every experiment's artifacts
+- [x] Worker lifecycle controller (crates/worker-lifecycle): four health dimensions,
+      functional-probe READY gate, per-reason escalation, recovery hysteresis,
+      generation epochs, drain — `make lifecycle-check` (tag: phase-4D)
 - [ ] vLLM-Metal benchmarks (needs `uv sync` in workers/vllm-metal)
 - [ ] Cross-runtime comparison at matched model size (9B GGUF/MLX/vLLM)
 - [ ] k3d control-plane simulation, fake accelerator node labels

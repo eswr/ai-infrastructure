@@ -47,6 +47,27 @@ cancellations are counted by phase; the queued-cancel variant is reported
 but not asserted (HTTP/1.1 disconnects are only observable at
 response-write time — HTTP/2 resets propagate into the queue).
 
+## Worker lifecycle acceptance (`make lifecycle-check`)
+
+Phase 4D added the failure classes that a boolean-health world cannot
+express. The mock worker reproduces the three real signatures the
+phase-4A runtime study found (`WEDGE_AFTER_REQUESTS`,
+`EMPTY_COMPLETION_PCT`, `STALL_AFTER_CHUNKS`), and
+`benchmarks/lifecycle/run_lifecycle_check.py` asserts the full state
+machine against the gateway's `/status` and `/metrics`:
+
+| scenario | injection | expected lifecycle path |
+| --- | --- | --- |
+| `silent-wedge` | `/health` 200, every POST hangs | READY → UNHEALTHY(`functional_probe_timeout`, transport still up) → 503 to new requests → RECOVERING → WARMING → READY at `generation ≥ 2` |
+| `connection-failure` | SIGKILL the worker | READY → DEGRADED(`connect_failed`) → UNHEALTHY → 503 → restart → READY gen 2 |
+| `empty-completion` | HTTP 200, 0 tokens, always | client sees clean 200s; `inference_empty_completions_total` ≥ 1; READY → DEGRADED(`empty_completion`) → UNHEALTHY; clean restart → READY, semantic dimension back up |
+| `midstream-stall` | stream 1 chunk, freeze | stream-stall watchdog aborts ≤ 2 s; `stream_stalled` outcome; READY → DEGRADED(`stream_stalled`); capacity freed |
+| `restart-recovery` | kill + respawn | generation 1 → 2; path goes through RECOVERING → WARMING → READY (probe-gated, not `/health`-gated) |
+| `drain` | `POST /admin/workers/mock/drain` mid-request | READY → DRAINING; new request 503; in-flight request completes; DRAINING → STOPPED |
+
+Every scenario runs its own mock worker (:8092) + gateway (:8096); the
+suite is stdlib-only and exits non-zero on any failed assert.
+
 ## Manual procedures
 
 The mock worker (workers/mock-gpu) exists so none of these tests need GPU

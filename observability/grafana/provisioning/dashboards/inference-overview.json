@@ -800,6 +800,302 @@
      "legendFormat": "{{worker}} fixed ms"
     }
    ]
+  },
+  {
+   "id": 50,
+   "type": "state-timeline",
+   "title": "Worker lifecycle state (per worker and state)",
+   "description": "inference_worker_state \u2014 one series per (worker, state). READY must dominate; WARMING/UNHEALTHY bands are restarts; DEGRADED bands are accumulating failures (connect blips, empty completions, stalls).",
+   "gridPos": {
+    "x": 0,
+    "y": 32,
+    "w": 16,
+    "h": 7
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "lineWidth": 0,
+      "fillOpacity": 80,
+      "spanNulls": false,
+      "insertNulls": false,
+      "hideFrom": {
+       "legend": false,
+       "tooltip": false,
+       "viz": false
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "mergeValue": true,
+    "showValue": "never",
+    "alignValue": "center",
+    "legend": {
+     "displayMode": "list",
+     "placement": "right",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "inf-lab-prom"
+     },
+     "expr": "inference_worker_state{job=\"gateway\"}",
+     "legendFormat": "{{worker}} {{state}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 51,
+   "type": "stat",
+   "title": "Restarts",
+   "gridPos": {
+    "x": 16,
+    "y": 32,
+    "w": 4,
+    "h": 3
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "inf-lab-prom"
+     },
+     "expr": "sum(inference_worker_restarts_total{job=\"gateway\"})",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 52,
+   "type": "stat",
+   "title": "Probe failures",
+   "gridPos": {
+    "x": 20,
+    "y": 32,
+    "w": 4,
+    "h": 3
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "inf-lab-prom"
+     },
+     "expr": "sum(inference_worker_functional_probe_failures_total{job=\"gateway\"})",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 53,
+   "type": "stat",
+   "title": "Empty completions",
+   "gridPos": {
+    "x": 16,
+    "y": 35,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "inf-lab-prom"
+     },
+     "expr": "sum(inference_empty_completions_total{job=\"gateway\"})",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 54,
+   "type": "stat",
+   "title": "Worst failure streak",
+   "gridPos": {
+    "x": 20,
+    "y": 35,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "inf-lab-prom"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 2
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "auto"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "inf-lab-prom"
+     },
+     "expr": "max(inference_worker_consecutive_failures{job=\"gateway\"})",
+     "refId": "A"
+    }
+   ]
   }
  ]
 }

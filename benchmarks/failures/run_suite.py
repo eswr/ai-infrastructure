@@ -291,12 +291,29 @@ def run_scenario(path):
         genv = {
             "GATEWAY_ADDR": f"127.0.0.1:{GATEWAY_PORT}",
             "WORKERS": f"mock=http://127.0.0.1:{WORKER_PORT}#mock-gpu",
+            # Fast lifecycle so scenarios don't wait on probe cadences.
+            "HEALTH_INTERVAL_S": "1",
+            "FUNCTIONAL_PROBE_INTERVAL_S": "1",
         }
         genv.update({k: str(v) for k, v in conf.get("gateway", {}).items()})
         gateway = spawn([str(GATEWAY_BIN)], genv, log)
 
         if not wait_ready(f"{GATEWAY}/healthz"):
             return name, False, ["gateway never became ready"]
+
+        # Phase-4D contract: the gateway routes traffic only after the
+        # worker passed a functional probe (READY). /healthz alone lies.
+        ready = False
+        for _ in range(120):
+            try:
+                if json_status()["workers"][0]["state"] == "ready":
+                    ready = True
+                    break
+            except Exception:
+                pass
+            time.sleep(0.25)
+        if not ready:
+            return name, False, ["worker never reached READY (functional probe)"]
 
         failures = []
         results = None

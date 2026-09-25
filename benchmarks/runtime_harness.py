@@ -621,6 +621,11 @@ def run_study(rt: Runtime, matrix: Path, out_dir: Path, gateway_bin: Path) -> in
             "WORKERS": f"{rt.name}=http://127.0.0.1:{rt.port}#{rt.model}",
             "ROUTE_POLICY": "lor",
             "FIRST_TOKEN_TIMEOUT_S": "900",
+            # Steady-state functional probes are real GPU work; measured runs
+            # must not be perturbed. Lifecycle stays fully active for
+            # startup gating and failure escalation (probes of non-READY
+            # workers still run).
+            "FUNCTIONAL_PROBE_INTERVAL_READY_S": "0",
             "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318",
         }
         with (rt_dir / "gateway.log").open("wb") as gw_log:
@@ -635,6 +640,29 @@ def run_study(rt: Runtime, matrix: Path, out_dir: Path, gateway_bin: Path) -> in
                     time.sleep(0.2)
                 else:
                     raise RuntimeError("gateway never became ready")
+                # The gateway now owns worker readiness: wait until its
+                # lifecycle controller declares the worker READY (a real
+                # generation probe passed), then hold that verdict against
+                # the harness's own probe for the lifecycle record.
+                gw_state = None
+                for _ in range(300):
+                    status, body = http_get("http://127.0.0.1:8080/status")
+                    if status == 200:
+                        try:
+                            w0 = json.loads(body)["workers"][0]
+                            gw_state = {
+                                "state": w0["state"],
+                                "generation": w0["generation"],
+                                "reason": w0.get("state_reason"),
+                            }
+                            if w0["state"] == "ready":
+                                break
+                        except (KeyError, json.JSONDecodeError):
+                            pass
+                    time.sleep(0.5)
+                else:
+                    raise RuntimeError(f"gateway never declared worker READY (last {gw_state})")
+                lifecycle["gateway_worker_at_benchmark_start"] = gw_state
                 cmd = [str(gateway_bin.parent / "loadgen"), "--matrix", str(matrix), "--out-dir", str(rt_dir)]
                 log(f"{rt.name}: loadgen {' '.join(str(c) for c in cmd[1:])}")
                 rc = subprocess.run(cmd, cwd=REPO).returncode
@@ -644,7 +672,9 @@ def run_study(rt: Runtime, matrix: Path, out_dir: Path, gateway_bin: Path) -> in
                 # recovery probe while the gateway is still up.
                 time.sleep(2)
                 sampler.phase = "recovery"
-                record(rt.functional_probe(phase="post_benchmark"), extra={"gateway_metrics": gateway_fairness()})
+                record(rt.functional_probe(phase="post_benchmark"),
+                       extra={"gateway_metrics": gateway_fairness(),
+                              "gateway_lifecycle": gateway_lifecycle()})
                 os.killpg(gw.pid, signal.SIGTERM)
                 gw.wait(timeout=15)
 
@@ -695,6 +725,28 @@ def gateway_fairness() -> dict:
                 except ValueError:
                     continue
     return out
+
+
+def gateway_lifecycle() -> dict:
+    """The gateway lifecycle controller's verdict on the same worker the
+    harness just probed — the production controller cross-checked against
+    the harness's independent verdict (phase 4D)."""
+    status, body = http_get("http://127.0.0.1:8080/status")
+    if status != 200:
+        return {"available": False}
+    try:
+        w0 = json.loads(body)["workers"][0]
+    except (KeyError, json.JSONDecodeError):
+        return {"available": False}
+    return {
+        "available": True,
+        "state": w0["state"],
+        "reason": w0.get("state_reason"),
+        "generation": w0["generation"],
+        "dimensions": w0.get("dimensions"),
+        "consecutive_failures": w0.get("consecutive_failures"),
+        "transitions_total": w0.get("transitions_total"),
+    }
 
 
 def find_matrix_json(rt_dir: Path) -> Path | None:
