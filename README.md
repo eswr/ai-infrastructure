@@ -118,6 +118,10 @@ docs/          architecture · benchmark-methodology · failure-testing ·
 - [x] Worker lifecycle controller (crates/worker-lifecycle): four health dimensions,
       functional-probe READY gate, per-reason escalation, recovery hysteresis,
       generation epochs, drain — `make lifecycle-check` (tag: phase-4D)
+- [x] Prefix-cache efficiency study (docs/results/prefix-cache-efficiency.md):
+      warm reuse erases prefill (TTFT ×24.7 at c1), savings/token ×270 from c1→c8,
+      and the cold-population trap: same-prefix bursts serialize on LCP slot
+      affinity (253 s vs 19 s all-miss) — tag `phase-4b-prefix-cache`
 - [ ] vLLM-Metal benchmarks (needs `uv sync` in workers/vllm-metal)
 - [ ] Cross-runtime comparison at matched model size (9B GGUF/MLX/vLLM)
 - [ ] k3d control-plane simulation, fake accelerator node labels
