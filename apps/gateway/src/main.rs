@@ -1,15 +1,30 @@
 //! gateway — OpenAI-compatible inference edge in front of the lab's workers.
 //!
-//! Request path (phase 4D):
+//! Request path (phase 4B.2):
 //!
 //! ```text
 //! request → estimate tokens → admission control (budget by estimated work;
 //!           queue with token/seconds accounting, or 429 + Retry-After when
-//!           overloaded) → scheduler (LOR / adaptive ECT / prefix affinity,
-//!           lifecycle-aware, re-route on connect failure) → worker →
-//!           instrumented stream (TTFT decomposition, ITL, token counts,
-//!           first-token + mid-stream stall watchdogs, OTel spans) → client
+//!           overloaded) → scheduler (LOR / adaptive ECT / prefix affinity /
+//!           slot policies: least-work, prefix-only, load-gated cache-aware
+//!           ECT; lifecycle-aware; atomic pick+reserve so bursts price each
+//!           other in; re-route on connect failure) → worker [llama.cpp slot
+//!           workers get `id_slot` + `cache_prompt` injected] → instrumented
+//!           stream (TTFT decomposition, ITL, token counts, first-token +
+//!           mid-stream stall watchdogs, cache_n reuse telemetry, OTel
+//!           spans) → client
 //! ```
+//!
+//! Slot routing (WORKER_SLOTS>0): one llama.cpp server is modeled as N
+//! slot workers, each a schedulable cache domain. The load-gated
+//! cache-aware ECT policy prices every slot's estimated TTFT as
+//! `remaining work + fixed + (prompt − reusable prefix) × prefill rate`
+//! and picks the argmin — reuse is taken only when it beats the wait, and
+//! every refusal of available cache is counted with its reason
+//! (`scheduler_cache_affinity_bypassed_total`). The model's prediction
+//! error vs actual TTFT is recorded per request. Slot cache knowledge is
+//! learned from the gateway's own dispatches and from client-pinned
+//! `id_slot` warmers.
 //!
 //! Worker lifecycle: every worker walks STARTING → WARMING → READY before
 //! it receives traffic, driven by a `/health` transport poll AND a tiny
@@ -32,7 +47,11 @@
 //! * `GATEWAY_ADDR`       listen address            (default 0.0.0.0:8080)
 //! * `WORKERS` — `name=url[,name=url...]`, optional `#model` suffix
 //!   (default mlx=http://127.0.0.1:8082)
-//! * `ROUTE_POLICY`       lor | ect | prefix-affinity (default lor)
+//! * `WORKER_SLOTS`       model each upstream as N llama.cpp slots (default 0)
+//! * `ROUTE_POLICY`       lor | ect | prefix-affinity | native | least-work |
+//!   prefix-only | cache-aware-ect  (default lor)
+//! * `SCHEDULER_MIN_CACHE_SAVINGS_MS`  reuse below this (ms) is priced as
+//!   absent by cache-aware ECT (default 0 = off)
 //! * `ADMIT_MAX_ACTIVE_INPUT_TOKENS`  prefill budget, 0 = off (default 0)
 //! * `ADMIT_MAX_ACTIVE_OUTPUT_TOKENS` decode budget, 0 = off (default 0)
 //! * `ADMIT_MAX_WORK_MS`  per-request estimated-work cap, 0 = off
@@ -69,7 +88,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use inference_lab_protocol::ChatCompletionRequest;
 use inference_lab_scheduler::{
-    RequestShape, Router as WorkerRouter, SelectOutcome, ServiceDefaults, WorkerHandle,
+    RequestShape, RouteDecision, Router as WorkerRouter, RouterConfig, SelectOutcome,
+    ServiceDefaults, WorkerHandle,
 };
 use inference_lab_worker_lifecycle::{Dimension, FailureReason, WorkerState};
 use metrics::Metrics;
@@ -95,6 +115,125 @@ struct AppState {
 fn error_json(status: StatusCode, msg: &str) -> Response {
     let body = serde_json::json!({"error": {"message": msg, "type": "gateway_error"}});
     (status, Json(body)).into_response()
+}
+
+/// Export a routing decision everywhere it can answer questions later:
+/// root-span attributes, the scheduler.select span's per-candidate table,
+/// Prometheus counters/histograms, and one grep-able log line. This is
+/// the "why did this request deliberately miss the cache?" artifact.
+fn record_decision(
+    st: &AppState,
+    root: &telemetry::SpanHandle,
+    sel_span: Option<&telemetry::SpanHandle>,
+    d: &RouteDecision,
+    prefix_hash: u64,
+) {
+    let chosen = d.candidates.get(d.chosen);
+    let mut attrs = vec![
+        KeyValue::new("scheduler.policy", d.policy.as_str()),
+        KeyValue::new("scheduler.selected_worker", d.worker.id.clone()),
+        KeyValue::new("scheduler.decision_reason", d.reason.as_str()),
+        KeyValue::new("cache.prefix_hash", format!("{prefix_hash:016x}")),
+    ];
+    if let Some(slot) = d.worker.slot {
+        attrs.push(KeyValue::new("scheduler.selected_slot", slot as i64));
+    }
+    if let Some(v) = chosen {
+        attrs.push(KeyValue::new("scheduler.estimated_ttft_ms", v.estimated_ttft_ms));
+        attrs.push(KeyValue::new("scheduler.estimated_queue_ms", v.remaining_work_ms));
+        attrs.push(KeyValue::new("scheduler.estimated_prefill_ms", v.prefill_cost_ms));
+        attrs.push(KeyValue::new("scheduler.cache_savings_ms", v.cache_savings_ms));
+        attrs.push(KeyValue::new("scheduler.cache_match_tokens", v.reusable_tokens as i64));
+        attrs.push(KeyValue::new("scheduler.cache_state_chosen", v.cache_state.as_str()));
+    }
+    if let Some(b) = &d.bypass {
+        attrs.push(KeyValue::new("scheduler.bypass_reason", b.reason));
+        attrs.push(KeyValue::new("scheduler.bypassed_worker", b.worker_id.clone()));
+        attrs.push(KeyValue::new("scheduler.bypassed_savings_ms", b.forgone_savings_ms));
+        attrs.push(KeyValue::new("scheduler.bypassed_match_tokens", b.forgone_match_tokens as i64));
+        st.metrics
+            .scheduler_cache_affinity_bypassed_total
+            .with_label_values(&[b.reason])
+            .inc();
+    }
+    for kv in &attrs {
+        root.span().set_attribute(kv.clone());
+    }
+
+    if let Some(span) = sel_span {
+        // Per-candidate decision table on the select span: every slot the
+        // router priced, with the numbers that decided it. Slots without
+        // reuse and not chosen stay off the span (native legs export
+        // nothing — there is no table).
+        for (i, v) in d.candidates.iter().enumerate() {
+            if v.reusable_tokens == 0 && i != d.chosen {
+                continue;
+            }
+            let key = v.slot.map(|s| s.to_string()).unwrap_or_else(|| v.worker_id.clone());
+            span.span().set_attribute(KeyValue::new(
+                format!("cache.match_tokens.slot{key}"),
+                v.reusable_tokens as i64,
+            ));
+            span.span().set_attribute(KeyValue::new(
+                format!("scheduler.queue_ms.slot{key}"),
+                v.remaining_work_ms,
+            ));
+            span.span().set_attribute(KeyValue::new(
+                format!("scheduler.cache_savings.slot{key}"),
+                v.cache_savings_ms,
+            ));
+            span.span().set_attribute(KeyValue::new(
+                format!("scheduler.estimated_ttft.slot{key}"),
+                v.estimated_ttft_ms,
+            ));
+        }
+    }
+
+    if let Some(v) = chosen {
+        st.metrics.scheduler_estimated_ttft_seconds.observe(v.estimated_ttft_ms / 1000.0);
+        st.metrics
+            .scheduler_estimated_queue_cost_seconds
+            .observe(v.remaining_work_ms / 1000.0);
+        if v.cache_savings_ms > 0.0 {
+            st.metrics
+                .scheduler_estimated_cache_savings_seconds
+                .observe(v.cache_savings_ms / 1000.0);
+        }
+        if d.candidates.iter().any(|c| c.cache_savings_ms > 0.0) {
+            st.metrics.scheduler_affinity_opportunities_total.inc();
+        }
+    }
+
+    // The human/CLI artifact: one line per decision, candidates priced.
+    let table = if d.candidates.is_empty() {
+        "n/a".to_string()
+    } else {
+        d.candidates
+            .iter()
+            .map(|v| {
+                let label = v.slot.map(|s| s.to_string()).unwrap_or_else(|| v.worker_id.clone());
+                format!(
+                    "{label}:est_ttft={:.1}s,q={:.1}s,saved={:.1}s,match={}tok",
+                    v.estimated_ttft_ms / 1000.0,
+                    v.remaining_work_ms / 1000.0,
+                    v.cache_savings_ms / 1000.0,
+                    v.reusable_tokens
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    tracing::info!(
+        target: "gateway::routing",
+        policy = d.policy.as_str(),
+        worker = %d.worker.id,
+        slot = ?d.worker.slot,
+        reason = d.reason.as_str(),
+        bypass = d.bypass.as_ref().map(|b| b.reason),
+        est_ttft_s = chosen.map(|v| (v.estimated_ttft_ms / 1000.0).to_string()).unwrap_or_default(),
+        candidates = %table,
+        "routing decision"
+    );
 }
 
 /// Hash the leading prompt content — the part a prefix cache would key on.
@@ -266,11 +405,17 @@ async fn chat_completions(
     };
 
     // ---- scheduling --------------------------------------------------------
-    let shape =
-        RequestShape { prefix_hash: hash, input_tokens: est_in, output_tokens: out_tok };
+    // A client-supplied id_slot pins the request (external cache warmers);
+    // otherwise the router picks — for slot policies that is a slot.
+    let shape = RequestShape {
+        prefix_hash: hash,
+        input_tokens: est_in,
+        output_tokens: out_tok,
+        pinned_slot: req.id_slot,
+    };
     let sel_span = telemetry::child_span(&root, "scheduler.select", SpanKind::Internal, vec![]);
-    let first_choice = match st.router.select(shape) {
-        SelectOutcome::Worker(w) => w,
+    let mut decision = match st.router.select_reserved(shape) {
+        SelectOutcome::Decided(d) => d,
         SelectOutcome::AllUnhealthy => {
             sel_span.span().end();
             st.metrics.requests_total.with_label_values(&["no_worker"]).inc();
@@ -279,21 +424,32 @@ async fn chat_completions(
             return error_json(StatusCode::SERVICE_UNAVAILABLE, "no healthy workers");
         }
     };
+    record_decision(&st, &root, Some(&sel_span), &decision, shape.prefix_hash);
     sel_span.span().end();
 
     // ---- dispatch (one re-route attempt on connect failure) -----------------
-    let mut worker = first_choice;
+    // The router already reserved the estimated work (outstanding +
+    // begin_work) atomically with the pick, so a burst cannot pile onto
+    // one slot before any dispatch registers. This loop consumes the
+    // reservation, or replaces it on a re-route.
+    let mut worker = decision.worker.clone();
+    let mut reservation = Some((decision.work_start, decision.est_total_ms));
 
     let (resp, est_total, work_start, worker_span) = loop {
+        let (work_start, est_total) = reservation.take().expect("reservation held for dispatch");
         st.metrics
             .scheduler_decisions_total
             .with_label_values(&[st.router.policy().as_str(), &worker.id])
             .inc();
-        worker.inc_outstanding();
         timeline.dispatched_at = Some(Instant::now());
 
-        let est_total = worker.service_time_ms(est_in, out_tok, worker.has_prefix(hash));
-        let work_start = worker.begin_work(est_total);
+        // Slot-pinned routes carry their slot on the wire, with prefix
+        // reuse pinned on too (the router's economics assume it happens).
+        let mut upreq = req.clone();
+        if let Some(slot) = worker.slot {
+            upreq.id_slot = Some(slot);
+            upreq.cache_prompt = Some(true);
+        }
 
         let url = format!("{}/v1/chat/completions", worker.endpoint.trim_end_matches('/'));
         let mut out_headers = HeaderMap::new();
@@ -316,7 +472,7 @@ async fn chat_completions(
         root.span().set_attribute(KeyValue::new("inference.runtime", worker.runtime.clone()));
         let connect_span = telemetry::child_span(&root, "worker.connect", SpanKind::Internal, vec![]);
 
-        match st.client.post(&url).headers(out_headers).json(&req).send().await {
+        match st.client.post(&url).headers(out_headers).json(&upreq).send().await {
             Ok(resp) if resp.status().is_success() => {
                 connect_span.span().set_attribute(KeyValue::new(
                     "inference.connect_ms",
@@ -372,13 +528,18 @@ async fn chat_completions(
                 worker_span.span().set_attribute(KeyValue::new("inference.error", format!("{e}")));
                 worker_span.span().end();
                 connect_span.span().end();
-                // Re-route once if another healthy worker exists.
-                if let SelectOutcome::Worker(w2) = st.router.select(shape) {
-                    if w2.id != worker.id {
-                        tracing::warn!(from = %worker.id, to = %w2.id, "connect failure, re-routing");
-                        worker = w2;
+                // Re-route once if another healthy candidate exists —
+                // reservation included, so the retry prices itself in.
+                match st.router.select_reserved(shape) {
+                    SelectOutcome::Decided(d2) if d2.worker.id != worker.id => {
+                        record_decision(&st, &root, None, &d2, shape.prefix_hash);
+                        tracing::warn!(from = %worker.id, to = %d2.worker.id, "connect failure, re-routing");
+                        worker = d2.worker.clone();
+                        decision = d2;
+                        reservation = Some((decision.work_start, decision.est_total_ms));
                         continue;
                     }
+                    _ => {}
                 }
                 st.metrics.requests_total.with_label_values(&["upstream_error"]).inc();
                 root.span().set_attribute(KeyValue::new("inference.outcome", "upstream_error"));
@@ -434,6 +595,11 @@ async fn chat_completions(
             first_token: Some(first_token_span),
             streaming: None,
         },
+        prefix_hash: hash,
+        estimated_ttft_ms: decision
+            .candidates
+            .get(decision.chosen)
+            .map(|v| v.estimated_ttft_ms),
         first_token_deadline: st.first_token_timeout.map(|t| Instant::now() + t),
         stream_stall_timeout: st.stream_stall_timeout,
         stream_mode,
@@ -479,11 +645,13 @@ async fn status(State(st): State<Arc<AppState>>) -> Response {
         .iter()
         .map(|w| {
             let cond = w.condition();
+            let cache = w.slot_cache_snapshot();
             serde_json::json!({
                 "id": w.id,
                 "endpoint": w.endpoint,
                 "runtime": w.runtime,
                 "model": w.model,
+                "slot": w.slot,
                 // "healthy" = receives traffic (READY or DEGRADED).
                 "healthy": w.is_healthy(),
                 "state": cond.state.as_str(),
@@ -506,6 +674,12 @@ async fn status(State(st): State<Arc<AppState>>) -> Response {
                 "fixed_overhead_ms": w.fixed_overhead_ms(),
                 "decode_ms_per_token": w.decode_ms_per_tok(),
                 "remaining_work_s": w.remaining_work_ms() / 1000.0,
+                "cache": cache.map(|c| serde_json::json!({
+                    "fingerprint": format!("{:016x}", c.fingerprint),
+                    "state": c.state.as_str(),
+                    "prompt_real_tokens": c.prompt_real_tokens,
+                    "cached_real_tokens": c.cached_real_tokens,
+                })),
             })
         })
         .collect();
@@ -629,6 +803,24 @@ async fn gauge_sampler(st: Arc<AppState>) {
             m.worker_remaining_work_seconds
                 .with_label_values(&[id])
                 .set((w.remaining_work_ms() / 1000.0) as i64);
+            // Slot cache model: investment state + observed cache size.
+            match w.slot_cache_snapshot() {
+                Some(c) => {
+                    let state_n = match c.state {
+                        inference_lab_scheduler::CacheInvestment::Absent => 0,
+                        inference_lab_scheduler::CacheInvestment::Populating => 1,
+                        inference_lab_scheduler::CacheInvestment::Resident => 2,
+                    };
+                    m.worker_cache_state.with_label_values(&[id]).set(state_n);
+                    m.worker_cache_tokens
+                        .with_label_values(&[id])
+                        .set(c.cached_real_tokens as i64);
+                }
+                None => {
+                    m.worker_cache_state.with_label_values(&[id]).set(0);
+                    m.worker_cache_tokens.with_label_values(&[id]).set(0);
+                }
+            }
             // Lifecycle: one-hot state vector per worker + failure/epoch
             // gauges. The state gauge is the Grafana timeline's source.
             for s in WorkerState::all() {
@@ -686,28 +878,61 @@ async fn main() -> anyhow::Result<()> {
         decode_ms_per_tok: env_f64("PROFILE_DECODE_MS_PER_TOK", 76.0),
     };
 
-    let handles = parse_workers(&workers_spec)
-        .into_iter()
-        .map(|(name, url, model)| {
-            let runtime = name.split('-').next().unwrap_or("unknown").to_string();
-            Arc::new(WorkerHandle::with_defaults(name, url, model, runtime, service_defaults))
-        })
-        .collect::<Vec<_>>();
+    // WORKER_SLOTS>0 models each upstream as N slot workers (llama.cpp
+    // `-np N` cells with their own KV caches): routing becomes slot
+    // assignment, caches become per-slot schedulable domains. The runs
+    // that built this feature used a single llama-server with 8 slots.
+    let slot_count: u32 = std::env::var("WORKER_SLOTS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+
+    let mut handles: Vec<Arc<WorkerHandle>> = Vec::new();
+    for (name, url, model) in parse_workers(&workers_spec) {
+        let runtime = name.split('-').next().unwrap_or("unknown").to_string();
+        if slot_count > 0 {
+            for i in 0..slot_count {
+                let mut h = WorkerHandle::with_defaults(
+                    format!("{name}-slot{i}"),
+                    url.clone(),
+                    model.clone(),
+                    runtime.clone(),
+                    service_defaults,
+                );
+                h.slot = Some(i);
+                handles.push(Arc::new(h));
+            }
+        } else {
+            handles.push(Arc::new(WorkerHandle::with_defaults(
+                name, url, model, runtime, service_defaults,
+            )));
+        }
+    }
 
     for w in &handles {
-        tracing::info!(worker = %w.id, endpoint = %w.endpoint, model = %w.model, "registered worker");
+        tracing::info!(worker = %w.id, endpoint = %w.endpoint, model = %w.model, slot = ?w.slot, "registered worker");
     }
     let admission_policy = AdmissionPolicy::from_env();
     tracing::info!(
         ?policy,
+        slots_per_worker = slot_count,
         admission_enabled = admission_policy.enabled(),
         max_active_input_tokens = admission_policy.max_active_input_tokens,
         max_active_output_tokens = admission_policy.max_active_output_tokens,
         max_estimated_work_ms = admission_policy.max_estimated_work_ms,
         "routing policy + admission"
     );
+    if policy.is_slot_policy() && slot_count == 0 {
+        tracing::warn!(
+            "slot policy with WORKER_SLOTS=0: scoring runs per-worker, not per-slot \
+             (single candidate) — set WORKER_SLOTS to the server's -np value"
+        );
+    }
 
-    let router = Arc::new(WorkerRouter::new(handles, policy)?);
+    let router_config = RouterConfig {
+        min_cache_savings_ms: env_f64("SCHEDULER_MIN_CACHE_SAVINGS_MS", 0.0),
+    };
+    let router = Arc::new(WorkerRouter::with_config(handles, policy, router_config)?);
     let admission = AdmissionController::new(admission_policy);
     let first_token_timeout = env_f64("FIRST_TOKEN_TIMEOUT_S", 0.0);
     let stream_stall_timeout = env_f64("STREAM_STALL_TIMEOUT_S", 0.0);

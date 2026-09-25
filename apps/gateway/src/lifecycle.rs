@@ -116,13 +116,19 @@ pub fn judge_probe(http_ok: bool, status: u16, body: &str) -> HealthObservation 
 
 /// One functional probe: `probe_payload` with the configured timeout,
 /// classified into a transport- or functional-dimension observation.
+/// Slot workers are probed on their OWN slot (`id_slot`), so each of the
+/// server's `-np` cells proves it can really generate.
 pub async fn run_functional_probe(
     client: &reqwest::Client,
     worker: &WorkerHandle,
     cfg: &LifecycleConfig,
 ) -> (HealthObservation, Duration) {
     let url = format!("{}/v1/chat/completions", worker.endpoint.trim_end_matches('/'));
-    let payload = probe_payload(&worker.model, cfg.probe_max_tokens);
+    let mut payload = probe_payload(&worker.model, cfg.probe_max_tokens);
+    if let Some(slot) = worker.slot {
+        payload["id_slot"] = serde_json::json!(slot);
+        payload["cache_prompt"] = serde_json::json!(true);
+    }
     let t0 = Instant::now();
     let obs = match client.post(&url).json(&payload).timeout(cfg.probe_timeout).send().await {
         Err(e) if e.is_timeout() => HealthObservation::failed(

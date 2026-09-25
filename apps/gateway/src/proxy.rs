@@ -54,6 +54,10 @@ pub struct RequestTimeline {
     pub output_tokens: u64,
     pub prompt_tokens_reported: Option<u64>,
     pub completion_tokens_reported: Option<u64>,
+    /// Server-reported reusable-prefix tokens (llama.cpp
+    /// `timings.cache_n` on the final chunk / JSON body) — the realized
+    /// counterpart of the router's match estimate.
+    pub reused_tokens_reported: Option<u64>,
 }
 
 impl RequestTimeline {
@@ -71,6 +75,7 @@ impl RequestTimeline {
             output_tokens: 0,
             prompt_tokens_reported: None,
             completion_tokens_reported: None,
+            reused_tokens_reported: None,
         }
     }
 
@@ -182,6 +187,11 @@ pub struct StreamCtx {
     pub _in_flight: InFlightGuard,
     pub timeline: RequestTimeline,
     pub spans: TraceSpans,
+    /// The prompt-prefix fingerprint the router keyed its cache model on.
+    pub prefix_hash: u64,
+    /// The chosen slot's estimated TTFT at decision time (ms); the other
+    /// half of the prediction-error measurement in `finish`.
+    pub estimated_ttft_ms: Option<f64>,
     pub first_token_deadline: Option<Instant>,
     /// Mid-stream stall watchdog: abort when no token arrives for this long
     /// after generation started (0/off = None).
@@ -260,6 +270,16 @@ impl<S> InstrumentedStream<S> {
         for msg in self.parser.feed(bytes) {
             if msg.data == "[DONE]" || msg.data.is_empty() {
                 continue;
+            }
+            // llama.cpp puts `timings` (incl. cache_n = tokens served from
+            // the reusable-prefix cache) on the final stream chunk — the
+            // realized-reuse signal the slot cache model learns from.
+            if msg.data.contains("\"timings\"") {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&msg.data) {
+                    if let Some(cn) = v.pointer("/timings/cache_n").and_then(|x| x.as_u64()) {
+                        self.ctx.timeline.reused_tokens_reported = Some(cn);
+                    }
+                }
             }
             let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(&msg.data) else {
                 continue; // keepalives / non-chat events
@@ -387,6 +407,34 @@ impl<S> InstrumentedStream<S> {
         if let (Some(h), Some(e)) = (tl.headers_at, tl.ended_at) {
             m.stream_completion
                 .observe(e.duration_since(h).as_secs_f64());
+        }
+
+        // Routing model bookkeeping (phase 4B.2). Prediction error only
+        // exists where the model made an estimate and the request ran to
+        // a real first token; observed reuse and slot-cache learning only
+        // exist where the runtime reported its own telemetry.
+        if let (Some(actual), Some(estimated), true) = (
+            tl.ttft(),
+            self.ctx.estimated_ttft_ms,
+            matches!(outcome, Outcome::Completed),
+        ) {
+            let error_s = actual.as_secs_f64() - estimated / 1000.0;
+            m.scheduler_prediction_error_seconds.observe(error_s);
+            m.scheduler_prediction_abs_error_seconds.observe(error_s.abs());
+        }
+        if let Some(reused) = tl.reused_tokens_reported {
+            m.scheduler_observed_reused_tokens_total.inc_by(reused);
+        }
+        if w.slot.is_some() {
+            if let Some(prompt_real) = tl.prompt_tokens_reported {
+                if matches!(outcome, Outcome::Completed) {
+                    w.note_slot_completion(
+                        self.ctx.prefix_hash,
+                        prompt_real,
+                        tl.reused_tokens_reported.unwrap_or(0).min(prompt_real),
+                    );
+                }
+            }
         }
 
         // Adaptive service model.
@@ -610,6 +658,13 @@ where
                                 self.ctx.timeline.output_tokens = u.completion_tokens;
                             }
                         }
+                        // llama.cpp JSON bodies carry the same reuse
+                        // telemetry under `timings.cache_n`.
+                        if let Some(cn) =
+                            v.pointer("/timings/cache_n").and_then(|x| x.as_u64())
+                        {
+                            self.ctx.timeline.reused_tokens_reported = Some(cn);
+                        }
                     }
                 }
                 self.finish(Outcome::Completed);
@@ -679,6 +734,8 @@ mod tests {
                 first_token: None,
                 streaming: None,
             },
+            prefix_hash: 0,
+            estimated_ttft_ms: None,
             first_token_deadline: None,
             stream_stall_timeout: None,
             stream_mode: true,

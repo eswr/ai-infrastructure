@@ -33,6 +33,19 @@ pub struct ChatCompletionRequest {
     /// final streamed chunk.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_usage: bool,
+    /// Pin the request to one llama.cpp slot (`-np` parallel cell, its own
+    /// KV cache). Set by the gateway's slot router after it picks a slot,
+    /// and by loadgen warmups that populate a specific slot's cache.
+    /// `None` serializes nothing — llama.cpp then picks the slot itself
+    /// (LCP matching), which is the `native` baseline of the routing study.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_slot: Option<u32>,
+    /// Ask llama.cpp to reuse its cached prefix for this prompt. Set
+    /// alongside `id_slot` by the slot router; llama.cpp 0.4.1 defaults it
+    /// on, but the router's cache economics assume reuse actually happens,
+    /// so it pins the behavior explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_prompt: Option<bool>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -56,6 +69,8 @@ impl ChatCompletionRequest {
             temperature: default_temperature(),
             top_p: None,
             include_usage: false,
+            id_slot: None,
+            cache_prompt: None,
         }
     }
 }
@@ -211,5 +226,25 @@ mod tests {
         let raw = raw.replace("reasoning_content", "reasoning");
         let chunk: ChatCompletionChunk = serde_json::from_str(&raw).unwrap();
         assert_eq!(chunk_text(&chunk), Some("Thinking"));
+    }
+
+    #[test]
+    fn slot_fields_serialize_only_when_set() {
+        // Without slot routing the wire format must stay exactly what the
+        // other runtimes (mlx/vllm) already parse: no id_slot key at all.
+        let plain = ChatCompletionRequest::simple("m", "hi");
+        let v = serde_json::to_value(&plain).unwrap();
+        assert!(v.get("id_slot").is_none());
+        assert!(v.get("cache_prompt").is_none());
+
+        let pinned = serde_json::from_value::<ChatCompletionRequest>(serde_json::json!({
+            "model": "m", "messages": [], "id_slot": 3, "cache_prompt": true
+        }))
+        .unwrap();
+        assert_eq!(pinned.id_slot, Some(3));
+        assert_eq!(pinned.cache_prompt, Some(true));
+        let v = serde_json::to_value(&pinned).unwrap();
+        assert_eq!(v["id_slot"], 3);
+        assert_eq!(v["cache_prompt"], true);
     }
 }

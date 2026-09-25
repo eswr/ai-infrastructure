@@ -24,6 +24,44 @@
 //! * [`RoutingPolicy::PrefixAffinity`] — prefers workers that already served
 //!   (and therefore plausibly cached) the same prompt prefix.
 //!
+//! **Phase 4B.2 — slots as schedulable cache domains.** One llama.cpp
+//! server with `-np 8` behaves like eight single-request workers that
+//! happen to share weights: each slot owns a KV cache and serves one
+//! request at a time, queueing the rest. The gateway models that with one
+//! [`WorkerHandle`] per slot (`WorkerHandle::slot = Some(n)`) so a routing
+//! decision *is* a slot-assignment decision. Three slot-level policies
+//! join the lineup:
+//!
+//! * [`RoutingPolicy::SlotLeastWork`] — ignore caches, pure load: spread
+//!   by estimated work (the token-aware-LB baseline).
+//! * [`RoutingPolicy::SlotPrefixOnly`] — always join the slot with the
+//!   largest reusable prefix (deliberately recreates the phase-4B
+//!   cache-locality hotspot).
+//! * [`RoutingPolicy::SlotCacheAwareEct`] — the actual feature. For every
+//!   slot it prices the TTFT an arrival would see,
+//!
+//!   ```text
+//!   recompute_tokens = prompt_tokens − reusable_prefix_tokens(slot)
+//!   prefill_cost     = fixed + recompute_tokens × prefill_ms_per_tok
+//!   estimated_ttft   = remaining_work(slot) + prefill_cost
+//!   ```
+//!
+//!   and picks the argmin. A cache hit is therefore worth exactly what it
+//!   saves (`reusable × prefill_ms_per_tok`) and **only** while that
+//!   saving exceeds the wait for the warm slot — the load gate whose
+//!   absence made llama.cpp's own LCP slot selection serialize cold
+//!   same-prefix bursts into a 253 s TTFT hotspot (phase 4B).
+//!
+//! Slot cache knowledge is per-slot and single-entry (a llama.cpp slot
+//! cache holds one evolving sequence, so serving prefix B effectively
+//! ends prefix A's residency): [`CacheInvestment`] tracks whether the
+//! prefix is [`CacheInvestment::Absent`], [`CacheInvestment::Populating`]
+//! (a request carrying it is in flight — joining means waiting out that
+//! request) or [`CacheInvestment::Resident`] (observed reuse from the
+//! runtime's own `cache_n` telemetry). The gateway updates the state from
+//! its own dispatches, and honors client-pinned `id_slot` requests so
+//! external warmers teach the model directly.
+//!
 //! Workers also carry a full lifecycle (see `inference-lab-worker-lifecycle`):
 //! a per-worker state machine over four health dimensions (process /
 //! transport / functional / semantic) with per-reason escalation, recovery
@@ -56,6 +94,17 @@ pub enum RoutingPolicy {
     LeastOutstandingRequests,
     LeastEstimatedCompletionTime,
     PrefixAffinity,
+    /// Single upstream, no routing opinion: forward untouched (llama.cpp
+    /// keeps its own LCP slot selection). The phase-4B baseline.
+    Native,
+    /// Slot level: lowest estimated work, caches ignored.
+    SlotLeastWork,
+    /// Slot level: largest reusable prefix wins, load be damned — the
+/// explicit form of the pathology `native` stumbles into.
+    SlotPrefixOnly,
+    /// Slot level: argmin estimated TTFT over cache savings and load —
+    /// the load-gated prefix affinity feature (a.k.a. CacheAwareECT).
+    SlotCacheAwareEct,
 }
 
 impl RoutingPolicy {
@@ -64,6 +113,10 @@ impl RoutingPolicy {
             "lor" | "least-outstanding" => Some(Self::LeastOutstandingRequests),
             "ect" | "least-ect" => Some(Self::LeastEstimatedCompletionTime),
             "prefix" | "prefix-affinity" => Some(Self::PrefixAffinity),
+            "native" => Some(Self::Native),
+            "least-work" => Some(Self::SlotLeastWork),
+            "prefix-only" => Some(Self::SlotPrefixOnly),
+            "cache-aware-ect" | "load-gated-prefix" => Some(Self::SlotCacheAwareEct),
             _ => None,
         }
     }
@@ -73,7 +126,20 @@ impl RoutingPolicy {
             Self::LeastOutstandingRequests => "lor",
             Self::LeastEstimatedCompletionTime => "ect",
             Self::PrefixAffinity => "prefix-affinity",
+            Self::Native => "native",
+            Self::SlotLeastWork => "least-work",
+            Self::SlotPrefixOnly => "prefix-only",
+            Self::SlotCacheAwareEct => "cache-aware-ect",
         }
+    }
+
+    /// Slot-level policies score candidates through the cache-aware
+    /// candidate view instead of the legacy worker-level formulas.
+    pub fn is_slot_policy(&self) -> bool {
+        matches!(
+            self,
+            Self::SlotLeastWork | Self::SlotPrefixOnly | Self::SlotCacheAwareEct
+        )
     }
 }
 
@@ -86,12 +152,207 @@ pub struct RequestShape {
     pub input_tokens: u64,
     /// Requested output tokens (`max_tokens`).
     pub output_tokens: u64,
+    /// A client-supplied `id_slot` pin: route to exactly that slot when
+    /// the router models slots. External cache warmers use this to teach
+    /// the gateway's slot-cache model from real traffic.
+    pub pinned_slot: Option<u32>,
 }
 
-/// Result of worker selection.
+// ---------------------------------------------------------------------------
+// Slot cache model
+// ---------------------------------------------------------------------------
+
+/// Lifecycle of a prefix inside one slot's KV cache (see the module docs:
+/// the model is per-slot, single-entry — serving a different prefix ends
+/// the previous one's residency, matching llama.cpp's slot reality).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheInvestment {
+    /// The slot holds nothing reusable for this prefix.
+    Absent,
+    /// A request carrying the prefix is in flight on the slot: reuse is
+    /// coming, but only after that request's whole service time. Whether
+    /// to join it is precisely the load-gate question.
+    Populating,
+    /// Reuse observed (runtime `cache_n` telemetry): the prefix is resident.
+    Resident,
+}
+
+impl CacheInvestment {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Populating => "populating",
+            Self::Resident => "resident",
+        }
+    }
+}
+
+/// One slot's cached-prefix state as the gateway models it.
+#[derive(Debug, Clone)]
+pub struct SlotCacheEntry {
+    pub fingerprint: u64,
+    pub state: CacheInvestment,
+    /// Estimated prompt size of the request that established/refreshes
+    /// the entry (drives reuse estimates while POPULATING).
+    pub expected_est_tokens: u64,
+    /// Server-reported prompt size of the request whose completion made
+    /// the entry RESIDENT.
+    pub prompt_real_tokens: u64,
+    /// Server-reported reusable-prefix tokens at that completion
+    /// (llama.cpp `timings.cache_n`).
+    pub cached_real_tokens: u64,
+    pub last_used: Instant,
+}
+
+/// Read-only view of a slot's cache for one routing decision, with the
+/// reusable prefix translated into the request's estimated-token units.
+#[derive(Debug, Clone)]
+pub struct SlotCacheView {
+    pub state: CacheInvestment,
+    /// Reusable tokens for this request, estimated units (0 unless the
+    /// entry matches the request's fingerprint).
+    pub reusable_tokens: u64,
+    pub last_used: Option<Instant>,
+}
+
+/// The router's estimate of what one candidate (slot) would cost this
+/// request — one row of the full decision table the gateway exports to
+/// traces and logs, so every selection can answer "why?".
+#[derive(Debug, Clone)]
+pub struct CandidateView {
+    pub worker_id: String,
+    pub slot: Option<u32>,
+    pub cache_state: CacheInvestment,
+    /// Estimated reusable prefix tokens (this request's units).
+    pub reusable_tokens: u64,
+    /// Estimated ms of work ahead on the candidate (queue + active
+    /// prefill/decode remaining) at decision time.
+    pub remaining_work_ms: f64,
+    /// `fixed + (prompt − reusable) × prefill_rate` — this request's
+    /// prefill on the candidate.
+    pub prefill_cost_ms: f64,
+    /// `decode_rate × output_tokens` — constant across candidates, kept
+    /// for the exported table.
+    pub decode_cost_ms: f64,
+    /// The load-gated headline: `remaining_work + prefill_cost`.
+    pub estimated_ttft_ms: f64,
+    /// Full own service estimate (prefill + decode) once started.
+    pub estimated_service_ms: f64,
+    /// `reusable × prefill_rate` — what the cache saves vs a cold slot.
+    pub cache_savings_ms: f64,
+}
+
+/// Why a routing decision landed where it landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionReason {
+    /// One candidate only (native pass-through).
+    SingleWorker,
+    /// Legacy least-outstanding-requests.
+    LeastOutstanding,
+    /// Legacy ECT (remaining work + discounted service time).
+    LeastEstimatedTime,
+    /// Legacy prefix-affinity.
+    PrefixAffinity,
+    /// Slot least-work pick.
+    LeastWorkSpread,
+    /// Slot prefix-only with no resident/populating match: least-work
+    /// fallback.
+    NoPrefixAvailable,
+    /// Slot prefix-only joined the largest match.
+    PrefixOnlyAffinity,
+    /// Cache-aware ECT: the cache-warm slot also had the smallest
+    /// estimated TTFT.
+    CacheHitCheapest,
+    /// Cache-aware ECT deliberately gave up available reuse: waiting for
+    /// the warm slot cost more than recomputing elsewhere.
+    LoadOverrodeAffinity,
+    /// Same, but the deciding factor was the warm slot being mid-prefill.
+    PrefillPressureOverrodeAffinity,
+    /// Cache-aware ECT: reuse existed but under the configured
+    /// minimum-savings floor, so it was treated as absent.
+    InsufficientBenefit,
+    /// The client pinned the slot (`id_slot`); the router honored it.
+    ClientPinned,
+}
+
+impl DecisionReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SingleWorker => "single_worker",
+            Self::LeastOutstanding => "least_outstanding",
+            Self::LeastEstimatedTime => "least_estimated_time",
+            Self::PrefixAffinity => "prefix_affinity",
+            Self::LeastWorkSpread => "least_work_spread",
+            Self::NoPrefixAvailable => "no_prefix_available",
+            Self::PrefixOnlyAffinity => "prefix_only_affinity",
+            Self::CacheHitCheapest => "cache_hit_cheapest",
+            Self::LoadOverrodeAffinity => "load_overrode_affinity",
+            Self::PrefillPressureOverrodeAffinity => "prefill_pressure_overrode_affinity",
+            Self::InsufficientBenefit => "insufficient_benefit",
+            Self::ClientPinned => "client_pinned",
+        }
+    }
+
+    /// The Prometheus label for `scheduler_cache_affinity_bypassed_total`
+    /// when this reason means "reuse was available and refused".
+    pub fn bypass_label(&self) -> Option<&'static str> {
+        match self {
+            Self::LoadOverrodeAffinity => Some("queue_pressure"),
+            Self::PrefillPressureOverrodeAffinity => Some("prefill_pressure"),
+            Self::InsufficientBenefit => Some("insufficient_benefit"),
+            _ => None,
+        }
+    }
+}
+
+/// A completed selection: the winner, its reservation, and the full
+/// decision table for telemetry.
+pub struct RouteDecision {
+    pub worker: Arc<WorkerHandle>,
+    /// `begin_work` instant from the reservation made at selection time —
+    /// the caller MUST pass it to `end_work` exactly once.
+    pub work_start: Instant,
+    pub est_total_ms: f64,
+    pub est_prefill_ms: f64,
+    pub policy: RoutingPolicy,
+    pub reason: DecisionReason,
+    /// Set when available reuse was deliberately refused.
+    pub bypass: Option<BypassRecord>,
+    /// Every candidate scored, in registration order (slot index order
+    /// for slot workers).
+    pub candidates: Vec<CandidateView>,
+    /// Index into `candidates` of the winner.
+    pub chosen: usize,
+}
+
+/// "This request deliberately missed the cache": the rejected affinity,
+/// with the numbers that justified refusing it.
+#[derive(Debug, Clone)]
+pub struct BypassRecord {
+    /// Prometheus reason label (queue_pressure | prefill_pressure |
+    /// worker_degraded | insufficient_benefit).
+    pub reason: &'static str,
+    pub worker_id: String,
+    pub slot: Option<u32>,
+    /// Estimated ms the cached slot would have saved.
+    pub forgone_savings_ms: f64,
+    pub forgone_match_tokens: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Reservation outcome
+// ---------------------------------------------------------------------------
+
+/// Result of an atomic select+reserve.
 pub enum SelectOutcome {
-    Worker(Arc<WorkerHandle>),
+    Decided(RouteDecision),
     /// Every registered worker is unhealthy.
+    AllUnhealthy,
+}
+
+/// Result of a non-reserving selection (compat path).
+pub enum WorkerOutcome {
+    Worker(Arc<WorkerHandle>),
     AllUnhealthy,
 }
 
@@ -112,6 +373,21 @@ impl Default for ServiceDefaults {
             prefill_ms_per_tok: 5.35,
             decode_ms_per_tok: 76.0,
         }
+    }
+}
+
+/// Static router configuration (set once at startup from env).
+#[derive(Debug, Clone, Copy)]
+pub struct RouterConfig {
+    /// Reuse worth less than this (ms) is treated as absent by
+    /// cache-aware ECT — the knob that separates "free local hit" from
+    /// "not worth a sticky decision". 0 disables the floor.
+    pub min_cache_savings_ms: f64,
+}
+
+impl Default for RouterConfig {
+    fn default() -> Self {
+        Self { min_cache_savings_ms: 0.0 }
     }
 }
 
@@ -182,7 +458,7 @@ impl OnlineRateModel {
     }
 
     /// Feed one (t, y) observation; refits fixed/rate when the observed
-    /// token counts have enough spread to identify both parameters.
+    /// prompt sizes have enough spread to identify both parameters.
     fn observe(&self, t: f64, y: f64) {
         self.m_n.update(1.0);
         self.m_t.update(t);
@@ -208,12 +484,25 @@ impl OnlineRateModel {
 // Worker
 // ---------------------------------------------------------------------------
 
+/// One active dispatch's cost estimate, for remaining-work accounting.
+#[derive(Debug, Clone, Copy)]
+struct ActiveEstimate {
+    started: Instant,
+    est_total_ms: f64,
+    /// The prefill portion of `est_total_ms`: a dispatch younger than this
+    /// is still prefilling (the prefill-pressure bypass signal).
+    est_prefill_ms: f64,
+}
+
 pub struct WorkerHandle {
     pub id: String,
     pub endpoint: String,
     pub model: String,
     pub runtime: String,
     pub max_context: u64,
+    /// llama.cpp slot index when this handle models one slot of a shared
+    /// server (`-np` cell with its own KV cache); `None` = a whole worker.
+    pub slot: Option<u32>,
     /// Outstanding requests (raw count — LOR baseline and gauges).
     outstanding: AtomicU64,
     /// Lifecycle state machine: four health dimensions, per-reason
@@ -225,13 +514,18 @@ pub struct WorkerHandle {
     prefill_model: OnlineRateModel,
     decode_ms_per_tok: Ewma,
 
-    /// Active dispatches: (dispatched_at, estimated total ms). Drives
-    /// remaining-work ECT scoring and gauge export.
-    active_estimates: Mutex<Vec<(Instant, f64)>>,
+    /// Active dispatches with their estimates. Drives remaining-work ECT
+    /// scoring, the prefill-pressure signal and gauge export.
+    active_estimates: Mutex<Vec<ActiveEstimate>>,
 
-    /// Prefix hashes this worker has served — a proxy for what its KV/prefix
-    /// cache holds.
+    /// Prefix hashes this worker has served — a proxy for what its
+    /// KV/prefix cache holds (coarse, worker-granular; slot workers carry
+    /// the richer single-entry model below).
     pub cached_prefixes: Mutex<HashSet<u64>>,
+
+    /// Slot workers only: the single-entry prefix-cache model (see
+    /// [`CacheInvestment`]). `None` for whole-worker handles.
+    slot_cache: Mutex<Option<SlotCacheEntry>>,
 }
 
 impl WorkerHandle {
@@ -257,12 +551,14 @@ impl WorkerHandle {
             model: model.into(),
             runtime: runtime.into(),
             max_context: 0,
+            slot: None,
             outstanding: AtomicU64::new(0),
             lifecycle: Mutex::new(WorkerLifecycle::new(LifecyclePolicy::default())),
             prefill_model: OnlineRateModel::seeded(defaults.fixed_ms, defaults.prefill_ms_per_tok),
             decode_ms_per_tok: Ewma::seeded(defaults.decode_ms_per_tok),
             active_estimates: Mutex::new(Vec::new()),
             cached_prefixes: Mutex::new(HashSet::new()),
+            slot_cache: Mutex::new(None),
         }
     }
 
@@ -300,6 +596,13 @@ impl WorkerHandle {
         self.decode_ms_per_tok.get()
     }
 
+    /// Prefill cost in ms for `input_tokens` estimated tokens of which
+    /// `reusable_tokens` are already cached on this worker.
+    pub fn prefill_cost_ms(&self, input_tokens: u64, reusable_tokens: u64) -> f64 {
+        self.fixed_overhead_ms()
+            + (input_tokens.saturating_sub(reusable_tokens)) as f64 * self.prefill_ms_per_tok()
+    }
+
     /// Estimated total service time in ms for a request on this worker.
     /// A known prefix discounts the prefill term (cache hit).
     pub fn service_time_ms(&self, input_tokens: u64, output_tokens: u64, prefix_hit: bool) -> f64 {
@@ -327,12 +630,14 @@ impl WorkerHandle {
 
     // -- active-work tracking (ECT) ------------------------------------------
 
-    /// Register a dispatch with its estimated total service time. Returns
-    /// the start instant to hand back to [`WorkerHandle::end_work`].
-    pub fn begin_work(&self, est_ms: f64) -> Instant {
+    /// Register a dispatch with its estimated total AND prefill service
+    /// time. Returns the start instant to hand back to
+    /// [`WorkerHandle::end_work`]. Reservations made here are what make
+    /// concurrent selections under a burst see each other.
+    pub fn begin_work(&self, est_total_ms: f64, est_prefill_ms: f64) -> Instant {
         let started = Instant::now();
         if let Ok(mut v) = self.active_estimates.lock() {
-            v.push((started, est_ms));
+            v.push(ActiveEstimate { started, est_total_ms, est_prefill_ms });
         }
         started
     }
@@ -340,7 +645,9 @@ impl WorkerHandle {
     /// Remove a finished dispatch (idempotent: first matching entry goes).
     pub fn end_work(&self, started: Instant, est_ms: f64) {
         if let Ok(mut v) = self.active_estimates.lock() {
-            if let Some(pos) = v.iter().position(|(s, e)| *s == started && *e == est_ms) {
+            if let Some(pos) =
+                v.iter().position(|a| a.started == started && a.est_total_ms == est_ms)
+            {
                 v.swap_remove(pos);
             }
         }
@@ -352,10 +659,126 @@ impl WorkerHandle {
             .lock()
             .map(|v| {
                 v.iter()
-                    .map(|(start, est)| (est - start.elapsed().as_secs_f64() * 1000.0).max(0.0))
+                    .map(|a| (a.est_total_ms - a.started.elapsed().as_secs_f64() * 1000.0).max(0.0))
                     .sum()
             })
             .unwrap_or(0.0)
+    }
+
+    /// True when any active dispatch is (still estimated to be) in its
+    /// prefill phase — the prefill-pressure bypass signal.
+    pub fn is_prefilling(&self) -> bool {
+        self.active_estimates
+            .lock()
+            .map(|v| {
+                v.iter().any(|a| {
+                    a.started.elapsed().as_secs_f64() * 1000.0 < a.est_prefill_ms
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    // -- slot cache model -----------------------------------------------------
+
+    /// Read the slot's cache state for one routing decision. Whole-worker
+    /// handles always report Absent — they have no per-slot model.
+    pub fn slot_cache_view(&self, fingerprint: u64, prompt_est_tokens: u64) -> SlotCacheView {
+        let guard = self.slot_cache.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(e) if e.fingerprint == fingerprint => {
+                let reusable = match e.state {
+                    CacheInvestment::Absent => 0,
+                    CacheInvestment::Populating => e.expected_est_tokens.min(prompt_est_tokens),
+                    CacheInvestment::Resident => {
+                        let frac = if e.prompt_real_tokens > 0 {
+                            e.cached_real_tokens as f64 / e.prompt_real_tokens as f64
+                        } else {
+                            0.0
+                        };
+                        ((frac * prompt_est_tokens as f64).round() as u64)
+                            .min(prompt_est_tokens)
+                    }
+                };
+                SlotCacheView {
+                    state: e.state,
+                    reusable_tokens: reusable,
+                    last_used: Some(e.last_used),
+                }
+            }
+            _ => SlotCacheView {
+                state: CacheInvestment::Absent,
+                reusable_tokens: 0,
+                last_used: None,
+            },
+        }
+    }
+
+    /// Record that a request with this fingerprint was dispatched to the
+    /// slot. A different fingerprint replaces the entry (single-sequence
+    /// slot caches); the same fingerprint refreshes it. No-op for
+    /// whole-worker handles.
+    pub fn note_slot_dispatch(&self, fingerprint: u64, prompt_est_tokens: u64) {
+        if self.slot.is_none() {
+            return;
+        }
+        let mut guard = self.slot_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let replace = match guard.as_ref() {
+            Some(e) => e.fingerprint != fingerprint,
+            None => true,
+        };
+        if replace {
+            *guard = Some(SlotCacheEntry {
+                fingerprint,
+                state: CacheInvestment::Populating,
+                expected_est_tokens: prompt_est_tokens,
+                prompt_real_tokens: 0,
+                cached_real_tokens: 0,
+                last_used: Instant::now(),
+            });
+        } else if let Some(e) = guard.as_mut() {
+            e.last_used = Instant::now();
+            e.expected_est_tokens = e.expected_est_tokens.max(prompt_est_tokens);
+        }
+    }
+
+    /// Record the runtime's own reuse telemetry from a completed request:
+    /// the prefix is now RESIDENT with `cached_real_tokens` of
+    /// `prompt_real_tokens` observed reusable. No-op for whole-worker
+    /// handles.
+    pub fn note_slot_completion(
+        &self,
+        fingerprint: u64,
+        prompt_real_tokens: u64,
+        cached_real_tokens: u64,
+    ) {
+        if self.slot.is_none() {
+            return;
+        }
+        let mut guard = self.slot_cache.lock().unwrap_or_else(|e| e.into_inner());
+        // Whatever the model thought before: the slot's cache now holds
+        // this request's prompt, of which the runtime reports
+        // cached_real_tokens positions were served from cache.
+        if matches!(guard.as_ref(), Some(e) if e.fingerprint == fingerprint) {
+            let e = guard.as_mut().expect("checked above");
+            e.state = CacheInvestment::Resident;
+            e.prompt_real_tokens = prompt_real_tokens;
+            e.cached_real_tokens = cached_real_tokens;
+            e.last_used = Instant::now();
+        } else {
+            *guard = Some(SlotCacheEntry {
+                fingerprint,
+                state: CacheInvestment::Resident,
+                expected_est_tokens: 0,
+                prompt_real_tokens,
+                cached_real_tokens,
+                last_used: Instant::now(),
+            });
+        }
+    }
+
+    /// Operational snapshot for /status and gauges.
+    pub fn slot_cache_snapshot(&self) -> Option<SlotCacheEntry> {
+        self.slot_cache.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     // -- lifecycle ------------------------------------------------------------
@@ -446,14 +869,27 @@ impl WorkerHandle {
 pub struct Router {
     workers: Vec<Arc<WorkerHandle>>,
     policy: RoutingPolicy,
+    config: RouterConfig,
+    /// Serializes selection+reservation so a concurrent burst cannot send
+    /// two requests to the same "least loaded" slot before either
+    /// registers its work.
+    select_lock: Mutex<()>,
 }
 
 impl Router {
     pub fn new(workers: Vec<Arc<WorkerHandle>>, policy: RoutingPolicy) -> anyhow::Result<Self> {
+        Self::with_config(workers, policy, RouterConfig::default())
+    }
+
+    pub fn with_config(
+        workers: Vec<Arc<WorkerHandle>>,
+        policy: RoutingPolicy,
+        config: RouterConfig,
+    ) -> anyhow::Result<Self> {
         if workers.is_empty() {
             anyhow::bail!("router needs at least one worker");
         }
-        Ok(Self { workers, policy })
+        Ok(Self { workers, policy, config, select_lock: Mutex::new(()) })
     }
 
     pub fn workers(&self) -> &[Arc<WorkerHandle>] {
@@ -464,16 +900,22 @@ impl Router {
         self.policy
     }
 
+    pub fn config(&self) -> RouterConfig {
+        self.config
+    }
+
     /// Healthy workers only (empty slice means "nobody home").
     pub fn healthy_workers(&self) -> Vec<Arc<WorkerHandle>> {
         self.workers.iter().filter(|w| w.is_healthy()).cloned().collect()
     }
 
-    /// Pick the worker for a request. Also records the prefix on the winner.
-    pub fn select(&self, req: RequestShape) -> SelectOutcome {
+    /// Pick the worker for a request WITHOUT reserving work (compat path
+    /// used by tests and the admission estimator's what-ifs). Also records
+    /// the prefix on the winner.
+    pub fn select(&self, req: RequestShape) -> WorkerOutcome {
         let candidates = self.healthy_workers();
         if candidates.is_empty() {
-            return SelectOutcome::AllUnhealthy;
+            return WorkerOutcome::AllUnhealthy;
         }
         let winner = match self.policy {
             RoutingPolicy::LeastOutstandingRequests => {
@@ -501,10 +943,292 @@ impl Router {
                     min_by(&with_prefix, |w| w.outstanding() as f64)
                 }
             }
+            RoutingPolicy::Native => candidates[0].clone(),
+            RoutingPolicy::SlotLeastWork | RoutingPolicy::SlotPrefixOnly
+            | RoutingPolicy::SlotCacheAwareEct => {
+                // Non-reserving slot selection (compat/tests): same scoring,
+                // no reservation, so bursts can race — production must use
+                // `select_reserved`.
+                let views = self.views(&candidates, &req);
+                let chosen = self.pick(&views);
+                candidates[chosen].clone()
+            }
         };
         winner.remember_prefix(req.prefix_hash);
-        SelectOutcome::Worker(winner)
+        WorkerOutcome::Worker(winner)
     }
+
+    /// Pick the worker for a request AND reserve its estimated work on the
+    /// winner before returning, atomically. Concurrent handlers dispatching
+    /// a burst therefore each see the earlier reservations — eight
+    /// simultaneous least-work arrivals land on eight different slots
+    /// instead of racing onto one.
+    pub fn select_reserved(&self, req: RequestShape) -> SelectOutcome {
+        let _guard = self.select_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let candidates = self.healthy_workers();
+        if candidates.is_empty() {
+            return SelectOutcome::AllUnhealthy;
+        }
+
+        // Client pin: an explicit id_slot is honored when the router
+        // models slots (external cache warmers teach the model this way).
+        if let Some(pin) = req.pinned_slot {
+            if let Some(w) = candidates.iter().find(|w| w.slot == Some(pin)) {
+                let est_prefill = w.prefill_cost_ms(req.input_tokens, req.input_tokens.min(
+                    w.slot_cache_view(req.prefix_hash, req.input_tokens).reusable_tokens,
+                ));
+                let est_total =
+                    est_prefill + w.decode_ms_per_tok() * req.output_tokens as f64;
+                let work_start = w.begin_work(est_total, est_prefill);
+                w.inc_outstanding();
+                w.note_slot_dispatch(req.prefix_hash, req.input_tokens);
+                w.remember_prefix(req.prefix_hash);
+                let view = self.single_view(w, &req);
+                return SelectOutcome::Decided(RouteDecision {
+                    worker: w.clone(),
+                    work_start,
+                    est_total_ms: est_total,
+                    est_prefill_ms: est_prefill,
+                    policy: self.policy,
+                    reason: DecisionReason::ClientPinned,
+                    bypass: None,
+                    chosen: 0,
+                    candidates: vec![view],
+                });
+            }
+            // No modeled slot matches (e.g. native mode): fall through —
+            // the request body keeps the client's id_slot untouched.
+        }
+
+        let (winner, reason, bypass, views, chosen) = match self.policy {
+            RoutingPolicy::LeastOutstandingRequests => {
+                let winner = min_by(&candidates, |w| w.outstanding() as f64);
+                (winner, DecisionReason::LeastOutstanding, None, Vec::new(), 0)
+            }
+            RoutingPolicy::LeastEstimatedCompletionTime => {
+                let winner = min_by(&candidates, |w| {
+                    let prefix_hit = w.has_prefix(req.prefix_hash);
+                    w.remaining_work_ms()
+                        + w.service_time_ms(req.input_tokens, req.output_tokens, prefix_hit)
+                });
+                (winner, DecisionReason::LeastEstimatedTime, None, Vec::new(), 0)
+            }
+            RoutingPolicy::PrefixAffinity => {
+                let with_prefix: Vec<_> = candidates
+                    .iter()
+                    .filter(|w| w.has_prefix(req.prefix_hash))
+                    .cloned()
+                    .collect();
+                let winner = if with_prefix.is_empty() {
+                    min_by(&candidates, |w| w.outstanding() as f64)
+                } else {
+                    min_by(&with_prefix, |w| w.outstanding() as f64)
+                };
+                (winner, DecisionReason::PrefixAffinity, None, Vec::new(), 0)
+            }
+            RoutingPolicy::Native => (candidates[0].clone(), DecisionReason::SingleWorker, None, Vec::new(), 0),
+            RoutingPolicy::SlotLeastWork | RoutingPolicy::SlotPrefixOnly
+            | RoutingPolicy::SlotCacheAwareEct => {
+                let views = self.views(&candidates, &req);
+                let chosen = self.pick(&views);
+                let reason = self.slot_reason(&views, chosen);
+                let bypass = self.bypass_record(&views, chosen);
+                let winner = candidates[chosen].clone();
+                (winner, reason, bypass, views, chosen)
+            }
+        };
+
+        // Reserve: estimated cost registered before the lock releases, so
+        // the next concurrent arrival prices this dispatch into its own
+        // decision.
+        winner.remember_prefix(req.prefix_hash);
+        let (est_total, est_prefill) = match self.policy.is_slot_policy() {
+            false => {
+                let hit = winner.has_prefix(req.prefix_hash);
+                (
+                    winner.service_time_ms(req.input_tokens, req.output_tokens, hit),
+                    winner.fixed_overhead_ms()
+                        + winner.prefill_ms_per_tok()
+                            * req.input_tokens as f64
+                            * if hit { 0.3 } else { 1.0 },
+                )
+            }
+            true => {
+                let view = &views[chosen];
+                let est_prefill =
+                    winner.prefill_cost_ms(req.input_tokens, view.reusable_tokens);
+                let est_total =
+                    est_prefill + winner.decode_ms_per_tok() * req.output_tokens as f64;
+                (est_total, est_prefill)
+            }
+        };
+        let work_start = winner.begin_work(est_total, est_prefill);
+        winner.inc_outstanding();
+        if self.policy.is_slot_policy() {
+            winner.note_slot_dispatch(req.prefix_hash, req.input_tokens);
+        }
+
+        SelectOutcome::Decided(RouteDecision {
+            worker: winner,
+            work_start,
+            est_total_ms: est_total,
+            est_prefill_ms: est_prefill,
+            policy: self.policy,
+            reason,
+            bypass,
+            candidates: views,
+            chosen,
+        })
+    }
+
+    /// Candidate table for a slot policy decision: one row per healthy
+    /// candidate, priced for THIS request. `reusable_tokens` is the
+    /// *effective* reuse (after the minimum-savings floor under
+    /// cache-aware ECT); `cache_savings_ms` always reports the *raw*
+    /// savings so a floor-refused hit can still be attributed as
+    /// `insufficient_benefit` in telemetry.
+    fn views(&self, candidates: &[Arc<WorkerHandle>], req: &RequestShape) -> Vec<CandidateView> {
+        candidates
+            .iter()
+            .map(|w| {
+                let cache = w.slot_cache_view(req.prefix_hash, req.input_tokens);
+                let rate = w.prefill_ms_per_tok();
+                let raw_reusable = cache.reusable_tokens;
+                let reusable = match self.policy {
+                    RoutingPolicy::SlotCacheAwareEct
+                        if self.config.min_cache_savings_ms > 0.0
+                            && raw_reusable as f64 * rate < self.config.min_cache_savings_ms =>
+                    {
+                        0
+                    }
+                    _ => raw_reusable,
+                };
+                let decode = w.decode_ms_per_tok() * req.output_tokens as f64;
+                let prefill = w.prefill_cost_ms(req.input_tokens, reusable);
+                let remaining = w.remaining_work_ms();
+                CandidateView {
+                    worker_id: w.id.clone(),
+                    slot: w.slot,
+                    cache_state: cache.state,
+                    reusable_tokens: reusable,
+                    remaining_work_ms: remaining,
+                    prefill_cost_ms: prefill,
+                    decode_cost_ms: decode,
+                    estimated_ttft_ms: remaining + prefill,
+                    estimated_service_ms: prefill + decode,
+                    cache_savings_ms: raw_reusable as f64 * rate,
+                }
+            })
+            .collect()
+    }
+
+    /// One-row variant for the client-pinned path (no comparison, but the
+    /// exported table keeps the same shape).
+    fn single_view(&self, w: &Arc<WorkerHandle>, req: &RequestShape) -> CandidateView {
+        self.views(std::slice::from_ref(w), req).remove(0)
+    }
+
+    /// Winner index under the active slot policy.
+    fn pick(&self, views: &[CandidateView]) -> usize {
+        let least_work = |v: &CandidateView| {
+            // Cache ignored: prefill priced WITHOUT the reuse discount
+            // (adding savings back) plus whatever is already ahead.
+            v.remaining_work_ms + v.prefill_cost_ms + v.cache_savings_ms + v.decode_cost_ms
+        };
+        match self.policy {
+            RoutingPolicy::SlotLeastWork => min_idx(views, least_work),
+            RoutingPolicy::SlotPrefixOnly => {
+                let best = views
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| v.reusable_tokens > 0)
+                    .max_by(|(_, a), (_, b)| {
+                        a.reusable_tokens
+                            .cmp(&b.reusable_tokens)
+                            .then(b.estimated_ttft_ms.total_cmp(&a.estimated_ttft_ms))
+                    });
+                match best {
+                    Some((i, _)) => i,
+                    None => min_idx(views, least_work),
+                }
+            }
+            // The load gate: a cache hit is worth exactly its savings and
+            // only while they exceed the wait — argmin estimated TTFT.
+            RoutingPolicy::SlotCacheAwareEct => min_idx(views, |v| v.estimated_ttft_ms),
+            _ => 0,
+        }
+    }
+
+    fn slot_reason(&self, views: &[CandidateView], chosen: usize) -> DecisionReason {
+        match self.policy {
+            RoutingPolicy::SlotLeastWork => DecisionReason::LeastWorkSpread,
+            RoutingPolicy::SlotPrefixOnly => {
+                if views[chosen].reusable_tokens > 0 {
+                    DecisionReason::PrefixOnlyAffinity
+                } else {
+                    DecisionReason::NoPrefixAvailable
+                }
+            }
+            RoutingPolicy::SlotCacheAwareEct => {
+                let chosen_view = &views[chosen];
+                if chosen_view.reusable_tokens > 0 {
+                    return DecisionReason::CacheHitCheapest;
+                }
+                // Refused reuse? Attribute the bypass.
+                let Some(best) = views
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| v.cache_savings_ms > 0.0)
+                    .max_by(|(_, a), (_, b)| a.cache_savings_ms.total_cmp(&b.cache_savings_ms))
+                else {
+                    return DecisionReason::LeastWorkSpread; // genuinely cold
+                };
+                let (_, best_view) = best;
+                if best_view.cache_savings_ms < self.config.min_cache_savings_ms {
+                    DecisionReason::InsufficientBenefit
+                } else if best_view.cache_state == CacheInvestment::Populating {
+                    // The warm slot is mid-population: its head request is
+                    // still prefilling the very prefix we would reuse.
+                    DecisionReason::PrefillPressureOverrodeAffinity
+                } else {
+                    DecisionReason::LoadOverrodeAffinity
+                }
+            }
+            _ => DecisionReason::SingleWorker,
+        }
+    }
+
+    fn bypass_record(&self, views: &[CandidateView], chosen: usize) -> Option<BypassRecord> {
+        if self.policy != RoutingPolicy::SlotCacheAwareEct {
+            return None;
+        }
+        let reason = self.slot_reason(views, chosen).bypass_label()?;
+        let best = views
+            .iter()
+            .enumerate()
+            .filter(|(i, v)| *i != chosen && v.cache_savings_ms > 0.0)
+            .max_by(|(_, a), (_, b)| a.cache_savings_ms.total_cmp(&b.cache_savings_ms))?;
+        Some(BypassRecord {
+            reason,
+            worker_id: best.1.worker_id.clone(),
+            slot: best.1.slot,
+            forgone_savings_ms: best.1.cache_savings_ms,
+            forgone_match_tokens: best.1.reusable_tokens,
+        })
+    }
+}
+
+fn min_idx<T, F: Fn(&T) -> f64>(items: &[T], score: F) -> usize {
+    let mut best = 0;
+    let mut best_score = f64::INFINITY;
+    for (i, item) in items.iter().enumerate() {
+        let s = score(item);
+        if s < best_score {
+            best = i;
+            best_score = s;
+        }
+    }
+    best
 }
 
 fn min_by<F: Fn(&Arc<WorkerHandle>) -> f64>(workers: &[Arc<WorkerHandle>], score: F) -> Arc<WorkerHandle> {
@@ -527,8 +1251,29 @@ mod tests {
         w
     }
 
+    /// A READY slot worker.
+    fn slot(id: &str, n: u32) -> Arc<WorkerHandle> {
+        let mut w = WorkerHandle::new(id, format!("http://{id}"), "m", "mock");
+        w.slot = Some(n);
+        w.record_transport_success();
+        w.request_served();
+        Arc::new(w)
+    }
+
     fn shape(prefix: u64, in_tok: u64, out_tok: u64) -> RequestShape {
-        RequestShape { prefix_hash: prefix, input_tokens: in_tok, output_tokens: out_tok }
+        RequestShape {
+            prefix_hash: prefix,
+            input_tokens: in_tok,
+            output_tokens: out_tok,
+            pinned_slot: None,
+        }
+    }
+
+    fn decided(out: SelectOutcome) -> RouteDecision {
+        match out {
+            SelectOutcome::Decided(d) => d,
+            SelectOutcome::AllUnhealthy => panic!("expected a decision"),
+        }
     }
 
     #[test]
@@ -538,8 +1283,8 @@ mod tests {
         a.outstanding.store(3, Ordering::Relaxed);
         let r = Router::new(vec![a, b], RoutingPolicy::LeastOutstandingRequests).unwrap();
         match r.select(shape(1, 128, 64)) {
-            SelectOutcome::Worker(w) => assert_eq!(w.id, "b"),
-            SelectOutcome::AllUnhealthy => panic!("expected a worker"),
+            WorkerOutcome::Worker(w) => assert_eq!(w.id, "b"),
+            WorkerOutcome::AllUnhealthy => panic!("expected a worker"),
         }
     }
 
@@ -553,8 +1298,8 @@ mod tests {
         r.select(shape(42, 8, 8)); // some worker learns prefix 42
         let learned = if a.has_prefix(42) { "a" } else { "b" };
         match r.select(shape(42, 8, 8)) {
-            SelectOutcome::Worker(w) => assert_eq!(w.id, learned),
-            SelectOutcome::AllUnhealthy => panic!("expected a worker"),
+            WorkerOutcome::Worker(w) => assert_eq!(w.id, learned),
+            WorkerOutcome::AllUnhealthy => panic!("expected a worker"),
         }
     }
 
@@ -565,18 +1310,18 @@ mod tests {
         // remaining work dominates.
         let a = worker("a");
         let b = worker("b");
-        a.begin_work(100.0);
-        a.begin_work(100.0);
-        a.begin_work(100.0); // ~300 ms remaining
-        b.begin_work(60_000.0); // ~60 s remaining
+        a.begin_work(100.0, 100.0);
+        a.begin_work(100.0, 100.0);
+        a.begin_work(100.0, 100.0); // ~300 ms remaining
+        b.begin_work(60_000.0, 60_000.0); // ~60 s remaining
         a.outstanding.store(3, Ordering::Relaxed);
         b.outstanding.store(1, Ordering::Relaxed);
 
         let lor = Router::new(vec![a.clone(), b.clone()], RoutingPolicy::LeastOutstandingRequests)
             .unwrap();
         match lor.select(shape(7, 128, 64)) {
-            SelectOutcome::Worker(w) => assert_eq!(w.id, "b"),
-            SelectOutcome::AllUnhealthy => panic!(),
+            WorkerOutcome::Worker(w) => assert_eq!(w.id, "b"),
+            WorkerOutcome::AllUnhealthy => panic!(),
         }
 
         let ect = Router::new(
@@ -585,8 +1330,8 @@ mod tests {
         )
         .unwrap();
         match ect.select(shape(7, 128, 64)) {
-            SelectOutcome::Worker(w) => assert_eq!(w.id, "a"),
-            SelectOutcome::AllUnhealthy => panic!(),
+            WorkerOutcome::Worker(w) => assert_eq!(w.id, "a"),
+            WorkerOutcome::AllUnhealthy => panic!(),
         }
     }
 
@@ -632,8 +1377,8 @@ mod tests {
         a.record_failure(inference_lab_worker_lifecycle::Dimension::Transport, FailureReason::ConnectFailed);
         assert_eq!(a.state(), WorkerState::Unhealthy);
         match r.select(shape(1, 8, 8)) {
-            SelectOutcome::Worker(w) => assert_eq!(w.id, "b"),
-            SelectOutcome::AllUnhealthy => panic!(),
+            WorkerOutcome::Worker(w) => assert_eq!(w.id, "b"),
+            WorkerOutcome::AllUnhealthy => panic!(),
         }
         // Recovery is not one probe either: full ladder, then routable.
         a.record_transport_success();
@@ -641,8 +1386,8 @@ mod tests {
         a.request_served();
         assert_eq!(a.state(), WorkerState::Ready);
         match r.select(shape(2, 8, 8)) {
-            SelectOutcome::Worker(w) => assert_eq!(w.id, "a"),
-            SelectOutcome::AllUnhealthy => panic!(),
+            WorkerOutcome::Worker(w) => assert_eq!(w.id, "a"),
+            WorkerOutcome::AllUnhealthy => panic!(),
         }
     }
 
@@ -656,13 +1401,13 @@ mod tests {
             );
         }
         let r = Router::new(vec![a], RoutingPolicy::LeastEstimatedCompletionTime).unwrap();
-        assert!(matches!(r.select(shape(1, 8, 8)), SelectOutcome::AllUnhealthy));
+        assert!(matches!(r.select(shape(1, 8, 8)), WorkerOutcome::AllUnhealthy));
     }
 
     #[test]
     fn end_work_removes_estimate() {
         let w = worker("w");
-        let stored = w.begin_work(1234.0);
+        let stored = w.begin_work(1234.0, 0.0);
         assert!((w.remaining_work_ms() - 1234.0).abs() < 5.0);
         // A start Instant that can never match the stored one. (Two
         // consecutive Instant::now() calls can return the same tick on a
@@ -676,6 +1421,231 @@ mod tests {
     #[test]
     fn policy_parses() {
         assert_eq!(RoutingPolicy::parse("prefix-affinity"), Some(RoutingPolicy::PrefixAffinity));
+        assert_eq!(RoutingPolicy::parse("native"), Some(RoutingPolicy::Native));
+        assert_eq!(RoutingPolicy::parse("least-work"), Some(RoutingPolicy::SlotLeastWork));
+        assert_eq!(RoutingPolicy::parse("prefix-only"), Some(RoutingPolicy::SlotPrefixOnly));
+        assert_eq!(
+            RoutingPolicy::parse("cache-aware-ect"),
+            Some(RoutingPolicy::SlotCacheAwareEct)
+        );
+        assert_eq!(
+            RoutingPolicy::parse("load-gated-prefix"),
+            Some(RoutingPolicy::SlotCacheAwareEct)
+        );
         assert_eq!(RoutingPolicy::parse("nope"), None);
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 4B.2: slots as schedulable cache domains
+    // ---------------------------------------------------------------------
+
+    fn slot_bank(n: usize) -> Vec<Arc<WorkerHandle>> {
+        (0..n).map(|i| slot(&format!("s{i}"), i as u32).clone()).collect()
+    }
+
+    /// Realistic llama.cpp economics for this machine (estimated units):
+    /// 55 s to prefill 8.4K tokens cold, ~6 ms/token, ~25 ms/token decode.
+    fn llama_defaults() -> ServiceDefaults {
+        ServiceDefaults { fixed_ms: 250.0, prefill_ms_per_tok: 6.2, decode_ms_per_tok: 25.0 }
+    }
+
+    fn slots_with(n: usize, policy: RoutingPolicy) -> Router {
+        let bank: Vec<_> = slot_bank(n)
+            .into_iter()
+            .map(|w| {
+                Arc::new({
+                    let mut h = WorkerHandle::with_defaults(
+                        w.id.clone(),
+                        &w.endpoint,
+                        &w.model,
+                        "llama",
+                        llama_defaults(),
+                    );
+                    h.slot = w.slot;
+                    h.record_transport_success();
+                    h.request_served();
+                    h
+                })
+            })
+            .collect();
+        Router::new(bank, policy).unwrap()
+    }
+
+    #[test]
+    fn least_work_reservations_spread_a_burst_across_slots() {
+        let r = slots_with(8, RoutingPolicy::SlotLeastWork);
+        let mut seen = Vec::new();
+        for _ in 0..8 {
+            let d = decided(r.select_reserved(shape(7, 8400, 256)));
+            seen.push(d.worker.slot.unwrap());
+        }
+        seen.sort();
+        assert_eq!(seen, (0..8).collect::<Vec<_>>(), "each arrival must see prior reservations");
+    }
+
+    #[test]
+    fn slot_cache_investment_lifecycle() {
+        let r = slots_with(2, RoutingPolicy::SlotCacheAwareEct);
+        let s0 = r.workers()[0].clone();
+        assert_eq!(s0.slot_cache_view(42, 8400).state, CacheInvestment::Absent);
+
+        s0.note_slot_dispatch(42, 8400);
+        let v = s0.slot_cache_view(42, 8400);
+        assert_eq!(v.state, CacheInvestment::Populating);
+        assert_eq!(v.reusable_tokens, 8400, "populating reuse = expected prompt size");
+
+        s0.note_slot_completion(42, 11_400, 11_350);
+        let v = s0.slot_cache_view(42, 8400);
+        assert_eq!(v.state, CacheInvestment::Resident);
+        // Observed reuse scales by cached/prompt fraction (~99.6% here).
+        assert!(
+            (8300..=8400).contains(&v.reusable_tokens),
+            "reuse should track the observed fraction, got {}",
+            v.reusable_tokens
+        );
+
+        // A different fingerprint replaces the single-sequence entry.
+        s0.note_slot_dispatch(43, 8400);
+        assert_eq!(s0.slot_cache_view(42, 8400).state, CacheInvestment::Absent);
+        assert_eq!(s0.slot_cache_view(43, 8400).state, CacheInvestment::Populating);
+
+        // Whole-worker handles have no slot model.
+        let plain = worker("plain");
+        plain.note_slot_dispatch(42, 8400);
+        assert_eq!(plain.slot_cache_view(42, 8400).state, CacheInvestment::Absent);
+    }
+
+    #[test]
+    fn prefix_only_piles_onto_the_warm_slot() {
+        let r = slots_with(8, RoutingPolicy::SlotPrefixOnly);
+        r.workers()[0].note_slot_completion(7, 11_400, 11_400);
+        for _ in 0..4 {
+            let d = decided(r.select_reserved(shape(7, 8400, 256)));
+            assert_eq!(d.reason, DecisionReason::PrefixOnlyAffinity);
+            assert_eq!(d.worker.slot, Some(0), "affinity must win over 7 idle slots");
+        }
+        assert_eq!(r.workers()[0].outstanding(), 4, "the pile-on is the point");
+    }
+
+    #[test]
+    fn cache_aware_ect_prefers_warm_idle_slot() {
+        let r = slots_with(8, RoutingPolicy::SlotCacheAwareEct);
+        r.workers()[3].note_slot_completion(7, 11_400, 11_400);
+        let d = decided(r.select_reserved(shape(7, 8400, 256)));
+        assert_eq!(d.worker.slot, Some(3));
+        assert_eq!(d.reason, DecisionReason::CacheHitCheapest);
+        assert!(d.candidates[d.chosen].cache_savings_ms > 50_000.0);
+    }
+
+    #[test]
+    fn cache_aware_ect_spreads_cold_burst_during_population() {
+        let r = slots_with(8, RoutingPolicy::SlotCacheAwareEct);
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            let d = decided(r.select_reserved(shape(7, 8400, 256)));
+            seen.push(d.worker.slot.unwrap());
+            // All arrivals share the fingerprint; the first dispatch makes
+            // its slot POPULATING — joining it means waiting out its whole
+            // service time, which never beats a cold prefill here.
+            assert_ne!(d.reason, DecisionReason::CacheHitCheapest);
+        }
+        let mut sorted = seen.clone();
+        sorted.sort();
+        assert_eq!(sorted, (0..6).collect::<Vec<_>>(), "cold burst must spread");
+    }
+
+    #[test]
+    fn cache_aware_ect_load_overrides_affinity() {
+        let r = slots_with(8, RoutingPolicy::SlotCacheAwareEct);
+        // Slot 0 resident; every join queues behind its predecessor's
+        // ~6.65 s of decode (fixed 250 ms + 256 × 25 ms). The cold
+        // alternative costs ~52.3 s of prefill, so affinity wins exactly
+        // while the accumulated queue is cheaper — 8 joins, then the gate
+        // closes and the 9th arrival recomputes elsewhere.
+        r.workers()[0].note_slot_completion(7, 11_400, 11_400);
+        for _ in 0..8 {
+            let d = decided(r.select_reserved(shape(7, 8400, 256)));
+            assert_eq!(d.worker.slot, Some(0), "warm slot keeps winning until the gate closes");
+        }
+        let d = decided(r.select_reserved(shape(7, 8400, 256)));
+        assert_eq!(d.worker.slot, Some(1), "queue pressure must override affinity");
+        assert_eq!(d.reason, DecisionReason::LoadOverrodeAffinity);
+        let bypass = d.bypass.expect("a refused cache hit must be recorded");
+        assert_eq!(bypass.reason, "queue_pressure");
+        assert_eq!(bypass.slot, Some(0));
+        assert!(bypass.forgone_savings_ms > 50_000.0);
+    }
+
+    #[test]
+    fn cache_aware_ect_prefill_pressure_overrides_affinity() {
+        let r = slots_with(8, RoutingPolicy::SlotCacheAwareEct);
+        // Slot 0 is POPULATING (a same-prefix request in flight): reuse
+        // exists, but joining means waiting out a full prefill.
+        r.workers()[0].note_slot_dispatch(7, 8400);
+        r.workers()[0].begin_work(60_000.0, 55_000.0); // mid-prefill
+        r.workers()[0].inc_outstanding();
+        let d = decided(r.select_reserved(shape(7, 8400, 256)));
+        assert_eq!(d.worker.slot, Some(1));
+        assert_eq!(d.reason, DecisionReason::PrefillPressureOverrodeAffinity);
+        assert_eq!(d.bypass.unwrap().reason, "prefill_pressure");
+    }
+
+    #[test]
+    fn cache_aware_ect_floor_treats_tiny_reuse_as_absent() {
+        let r = Router::with_config(
+            slot_bank(4)
+                .into_iter()
+                .map(|w| {
+                    Arc::new({
+                        let mut h = WorkerHandle::with_defaults(
+                            w.id.clone(), &w.endpoint, &w.model, "llama", llama_defaults(),
+                        );
+                        h.slot = w.slot;
+                        h.record_transport_success();
+                        h.request_served();
+                        h
+                    })
+                })
+                .collect(),
+            RoutingPolicy::SlotCacheAwareEct,
+            RouterConfig { min_cache_savings_ms: 10_000.0 },
+        )
+        .unwrap();
+        // 100 of 11,400 real tokens reusable ≈ 460 ms of savings — far
+        // under the floor. The warm slot (index 3) must be priced cold;
+        // the argmin tie then resolves to index 0, and the floor-refused
+        // hit still shows up as an attributed bypass.
+        r.workers()[3].note_slot_completion(7, 11_400, 100);
+        let d = decided(r.select_reserved(shape(7, 8400, 256)));
+        assert_eq!(d.worker.slot, Some(0), "sub-floor reuse must not sticky-route");
+        assert_eq!(d.reason, DecisionReason::InsufficientBenefit);
+        let bypass = d.bypass.unwrap();
+        assert_eq!(bypass.reason, "insufficient_benefit");
+        assert_eq!(bypass.slot, Some(3));
+    }
+
+    #[test]
+    fn client_pin_reserves_the_named_slot_and_teaches_the_model() {
+        let r = slots_with(4, RoutingPolicy::SlotCacheAwareEct);
+        let shape = RequestShape { pinned_slot: Some(2), ..shape(7, 8400, 256) };
+        let d = decided(r.select_reserved(shape));
+        assert_eq!(d.worker.slot, Some(2));
+        assert_eq!(d.reason, DecisionReason::ClientPinned);
+        assert_eq!(d.worker.outstanding(), 1);
+        assert_eq!(
+            d.worker.slot_cache_view(7, 8400).state,
+            CacheInvestment::Populating,
+            "external warmers must be visible to the model"
+        );
+    }
+
+    #[test]
+    fn is_prefilling_tracks_the_prefill_phase() {
+        let w = worker("w");
+        assert!(!w.is_prefilling());
+        let start = w.begin_work(10_000.0, 9_000.0);
+        assert!(w.is_prefilling());
+        w.end_work(start, 10_000.0);
+        assert!(!w.is_prefilling());
     }
 }

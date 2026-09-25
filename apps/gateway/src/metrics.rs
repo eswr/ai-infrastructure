@@ -107,6 +107,39 @@ pub struct Metrics {
     pub worker_fixed_overhead_ms: IntGaugeVec,
     pub worker_remaining_work_seconds: IntGaugeVec,
 
+    // -- routing decisions (phase 4B.2: slots as schedulable cache domains) ----
+    /// Requests where reusable cache was available on some slot. The
+    /// denominator of "locality was available for X% of requests".
+    pub scheduler_affinity_opportunities_total: IntCounter,
+    /// Requests that DELIBERATELY ignored available reuse, by reason:
+    /// queue_pressure | prefill_pressure | worker_degraded |
+    /// insufficient_benefit. The interesting number next to the hit rate:
+    /// "locality was available, and the router refused it on purpose".
+    pub scheduler_cache_affinity_bypassed_total: IntCounterVec,
+    /// The routing equation's TTFT estimate for the chosen slot at
+    /// decision time (the model's prediction, before reality answers).
+    pub scheduler_estimated_ttft_seconds: Histogram,
+    /// Queue/wait component of the chosen slot's estimate.
+    pub scheduler_estimated_queue_cost_seconds: Histogram,
+    /// Cache savings component credited to the chosen slot.
+    pub scheduler_estimated_cache_savings_seconds: Histogram,
+    /// Signed prediction error `actual_TTFT − estimated_TTFT` for
+    /// completed requests. Negative = reality beat the model. Mean of
+    /// this series is the model BIAS; `scheduler_prediction_abs_error_*`
+    /// carries MAE and percentiles.
+    pub scheduler_prediction_error_seconds: Histogram,
+    /// Absolute prediction error: `_sum/_count` = MAE, buckets = p50/p95.
+    pub scheduler_prediction_abs_error_seconds: Histogram,
+    /// Server-truth reusable tokens observed on completed requests
+    /// (llama.cpp `timings.cache_n`) — the realized counterpart of the
+    /// router's match estimates.
+    pub scheduler_observed_reused_tokens_total: IntCounter,
+    /// Slot cache investment state per worker: 0 absent | 1 populating |
+    /// 2 resident (slot workers only).
+    pub worker_cache_state: IntGaugeVec,
+    /// Cached real tokens last observed on the worker's slot cache.
+    pub worker_cache_tokens: IntGaugeVec,
+
     // -- worker lifecycle (phase 4D) --------------------------------------------
     /// 1 on the worker's current state, 0 on the rest: the state-timeline
     /// panel's data source. `process alive ≠ serving traffic` is a *state*,
@@ -372,6 +405,69 @@ impl Metrics {
             &["worker"],
         )?;
 
+        let scheduler_affinity_opportunities_total = IntCounter::new(
+            "scheduler_affinity_opportunities_total",
+            "Requests with reusable cache available on at least one slot",
+        )?;
+        let scheduler_cache_affinity_bypassed_total = IntCounterVec::new(
+            Opts::new(
+                "scheduler_cache_affinity_bypassed_total",
+                "Requests that deliberately ignored available cache reuse, by reason",
+            ),
+            &["reason"],
+        )?;
+        for reason in [
+            "queue_pressure",
+            "prefill_pressure",
+            "worker_degraded",
+            "insufficient_benefit",
+        ] {
+            scheduler_cache_affinity_bypassed_total.with_label_values(&[reason]);
+        }
+        let scheduler_estimated_ttft_seconds = h(
+            "scheduler_estimated_ttft_seconds",
+            "Router's estimated TTFT for the chosen slot at decision time",
+            latency_buckets(),
+        )?;
+        let scheduler_estimated_queue_cost_seconds = h(
+            "scheduler_estimated_queue_cost_seconds",
+            "Queue/wait component of the chosen slot's TTFT estimate",
+            latency_buckets(),
+        )?;
+        let scheduler_estimated_cache_savings_seconds = h(
+            "scheduler_estimated_cache_savings_seconds",
+            "Cache savings component credited to the chosen slot",
+            latency_buckets(),
+        )?;
+        let signed_error_buckets = vec![
+            -600.0, -300.0, -120.0, -60.0, -30.0, -15.0, -5.0, -1.0, 1.0, 5.0, 15.0, 30.0, 60.0,
+            120.0, 300.0, 600.0,
+        ];
+        let scheduler_prediction_error_seconds = h(
+            "scheduler_prediction_error_seconds",
+            "Signed TTFT prediction error, actual minus estimated (mean = model bias)",
+            signed_error_buckets,
+        )?;
+        let scheduler_prediction_abs_error_seconds = h(
+            "scheduler_prediction_abs_error_seconds",
+            "Absolute TTFT prediction error (sum/count = MAE, buckets = p50/p95)",
+            latency_buckets(),
+        )?;
+        let scheduler_observed_reused_tokens_total = IntCounter::new(
+            "scheduler_observed_reused_tokens_total",
+            "Server-reported reusable-prefix tokens on completed requests",
+        )?;
+        let worker_cache_state = gauge_vec(
+            "gateway_worker_cache_state",
+            "Slot cache investment state: 0 absent | 1 populating | 2 resident",
+            &["worker"],
+        )?;
+        let worker_cache_tokens = gauge_vec(
+            "gateway_worker_cache_tokens",
+            "Cached real tokens last observed on the worker's slot cache",
+            &["worker"],
+        )?;
+
         reg!(registry, requests_total);
         reg!(registry, requests_in_flight);
         reg!(registry, input_tokens_total);
@@ -412,6 +508,16 @@ impl Metrics {
         reg!(registry, worker_consecutive_failures);
         reg!(registry, worker_generation);
         reg!(registry, empty_completions_total);
+        reg!(registry, scheduler_affinity_opportunities_total);
+        reg!(registry, scheduler_cache_affinity_bypassed_total);
+        reg!(registry, scheduler_estimated_ttft_seconds);
+        reg!(registry, scheduler_estimated_queue_cost_seconds);
+        reg!(registry, scheduler_estimated_cache_savings_seconds);
+        reg!(registry, scheduler_prediction_error_seconds);
+        reg!(registry, scheduler_prediction_abs_error_seconds);
+        reg!(registry, scheduler_observed_reused_tokens_total);
+        reg!(registry, worker_cache_state);
+        reg!(registry, worker_cache_tokens);
 
         Ok(Self {
             registry,
@@ -455,6 +561,16 @@ impl Metrics {
             worker_consecutive_failures,
             worker_generation,
             empty_completions_total,
+            scheduler_affinity_opportunities_total,
+            scheduler_cache_affinity_bypassed_total,
+            scheduler_estimated_ttft_seconds,
+            scheduler_estimated_queue_cost_seconds,
+            scheduler_estimated_cache_savings_seconds,
+            scheduler_prediction_error_seconds,
+            scheduler_prediction_abs_error_seconds,
+            scheduler_observed_reused_tokens_total,
+            worker_cache_state,
+            worker_cache_tokens,
         })
     }
 
