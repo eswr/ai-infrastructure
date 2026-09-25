@@ -270,6 +270,11 @@ async fn run_matrix(client: &reqwest::Client, path: &str, out_dir: &str) -> Resu
                 "output_tokens": scenario.output_tokens,
                 "stream": scenario.stream,
                 "shared_prefix_tokens": scenario.shared_prefix_tokens,
+                "expected_reuse_tokens": scenario.shared_prefix_tokens,
+                "prefix_fingerprint": format!(
+                    "{:016x}",
+                    inference_lab_workload::prefix_fingerprint(&scenario)
+                ),
                 "arrival": format_arrival(&scenario.arrival),
                 "seed": scenario.seed,
             },
@@ -412,6 +417,7 @@ fn write_run_artifacts(base: &str, summary: &Summary, records: &[RequestRecord])
                 "completion_ms": r.completion_ms(),
                 "completion_tokens": r.completion_tokens,
                 "prompt_tokens": r.prompt_tokens,
+                "reused_tokens": r.reused_tokens,
                 "token_ts_ms": r.token_ts_ms,
                 "non_streamed": r.non_streamed,
                 "itl_p50_ms": (!gaps.is_empty()).then(|| percentile(&gaps, 0.50)),
@@ -450,6 +456,16 @@ fn chrono_like_ts() -> String {
     let mth = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if mth <= 2 { y + 1 } else { y };
     format!("{y:04}{mth:02}{d:02}-{h:02}{m:02}{s:02}")
+}
+
+/// Observed reusable-prefix tokens from a non-streaming JSON response:
+/// llama.cpp exposes `timings.cache_n`, OpenAI-style servers expose
+/// `usage.prompt_tokens_details.cached_tokens`. Absent telemetry means
+/// None — reuse is never inferred from latency.
+fn extract_reused_tokens(v: &serde_json::Value) -> Option<u64> {
+    v.pointer("/timings/cache_n")
+        .and_then(|x| x.as_u64())
+        .or_else(|| v.pointer("/usage/prompt_tokens_details/cached_tokens").and_then(|x| x.as_u64()))
 }
 
 async fn run_one(client: &reqwest::Client, scenario: &Scenario, id: usize) -> RequestRecord {
@@ -500,6 +516,7 @@ async fn run_one(client: &reqwest::Client, scenario: &Scenario, id: usize) -> Re
                         record.completion_tokens = ct;
                     }
                 }
+                record.reused_tokens = extract_reused_tokens(&v);
                 record.e2e_ms = Some(t0.elapsed().as_secs_f64() * 1000.0);
                 record.ok = true;
             }
@@ -532,6 +549,7 @@ async fn run_one(client: &reqwest::Client, scenario: &Scenario, id: usize) -> Re
                         record.completion_tokens = ct;
                     }
                 }
+                record.reused_tokens = extract_reused_tokens(&v);
                 let ms = t0.elapsed().as_secs_f64() * 1000.0;
                 record.ttft_ms = Some(ms);
                 record.token_ts_ms = vec![ms];
@@ -563,6 +581,17 @@ async fn run_one(client: &reqwest::Client, scenario: &Scenario, id: usize) -> Re
                     let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(&msg.data) else {
                         continue; // keepalives / non-chat events
                     };
+                    // llama.cpp puts `timings` (incl. cache_n = tokens
+                    // served from the reusable-prefix cache) on the final
+                    // stream chunk — the per-request observed-reuse signal.
+                    if msg.data.contains("\"timings\"") {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&msg.data) {
+                            if let Some(cn) = v.pointer("/timings/cache_n").and_then(|x| x.as_u64())
+                            {
+                                record.reused_tokens = Some(cn);
+                            }
+                        }
+                    }
                     if let (Some(usage), true) = (&chunk.usage, chunk.choices.is_empty()) {
                         // Final usage chunk: server-truth token counts.
                         if usage.prompt_tokens > 0 {

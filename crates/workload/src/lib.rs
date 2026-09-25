@@ -96,6 +96,46 @@ impl Scenario {
     }
 }
 
+/// The verbatim shared prompt prefix text (the string every request
+/// starts with, beyond the fixed instruction line). Empty when the
+/// scenario configures no shared prefix.
+pub fn shared_prefix_text(scenario: &Scenario) -> String {
+    const VOCAB: &[&str] = &[
+        "inference", "scheduler", "kernel", "latency", "throughput", "batching",
+        "prefill", "decode", "memory", "cache", "router", "gateway", "streaming",
+        "quantization", "tokens", "attention", "worker", "queue", "pressure",
+        "system", "buffer", "engine", "pipeline", "server", "request", "context",
+        "window", "model", "runtime", "metal", "unified", "bandwidth", "compute",
+        "granularity", "eviction", "admission", "backlog", "capacity", "elastic",
+        "signal", "processor", "graph", "operator", "gradient", "shard", "fabric",
+    ];
+    if scenario.shared_prefix_tokens == 0 {
+        return String::new();
+    }
+    let prefix_words = scenario.shared_prefix_tokens * 4 / 3;
+    let mut rng = StdRng::seed_from_u64(scenario.seed ^ 0x5EED_0000);
+    (0..prefix_words)
+        .map(|_| VOCAB[rng.random_range(0..VOCAB.len())])
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Stable identity of the reusable prefix: hash over (model, shared prefix
+/// text, nominal sizes). Cached-token reuse is only meaningful between
+/// requests with the same fingerprint — a different tokenizer/model would
+/// shard the same string into different tokens, so the string alone is
+/// NOT the identity.
+pub fn prefix_fingerprint(scenario: &Scenario) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    scenario.model.hash(&mut h);
+    shared_prefix_text(scenario).hash(&mut h);
+    scenario.shared_prefix_tokens.hash(&mut h);
+    scenario.input_tokens.hash(&mut h);
+    h.finish()
+}
+
 /// Prompt synthesis: ~1 token ≈ 0.75 words for English prose, so we emit
 /// `tokens * 4 / 3` words. The first `shared_prefix_tokens` worth of words
 /// are identical across all requests so prefix caching has something to hit;
@@ -201,5 +241,34 @@ mod tests {
         let mut s = scenario();
         s.arrival = Arrival::Burst;
         assert!(s.arrival_offsets().iter().all(|o| o.is_zero()));
+    }
+
+    #[test]
+    fn prefix_fingerprint_is_stable_and_discriminating() {
+        let s = scenario();
+        assert_eq!(s.shared_prefix_tokens, 100);
+        // Same config: identical fingerprint (reruns must match).
+        assert_eq!(prefix_fingerprint(&s), prefix_fingerprint(&s.clone()));
+        // Different model => different tokenizer identity => different fp.
+        let mut other_model = s.clone();
+        other_model.model = "other".into();
+        assert_ne!(prefix_fingerprint(&s), prefix_fingerprint(&other_model));
+        // Different prefix size => different fp.
+        let mut other_prefix = s.clone();
+        other_prefix.shared_prefix_tokens = 200;
+        assert_ne!(prefix_fingerprint(&s), prefix_fingerprint(&other_prefix));
+        // No shared prefix => the empty prefix has its own (fixed) fp.
+        let mut no_prefix = s.clone();
+        no_prefix.shared_prefix_tokens = 0;
+        assert_eq!(prefix_fingerprint(&no_prefix), prefix_fingerprint(&no_prefix));
+        assert_ne!(prefix_fingerprint(&s), prefix_fingerprint(&no_prefix));
+        // The fingerprint covers the actual prefix text, and build_messages
+        // really embeds it in every request.
+        let a = build_messages(&s, 0)[1].content.clone();
+        let b = build_messages(&s, 3)[1].content.clone();
+        let prefix = shared_prefix_text(&s);
+        assert!(prefix.len() > 100);
+        assert!(a.contains(&prefix), "request 0 must contain the shared prefix");
+        assert!(b.contains(&prefix), "request 3 must contain the shared prefix");
     }
 }

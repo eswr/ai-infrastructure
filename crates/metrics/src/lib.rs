@@ -31,6 +31,11 @@ pub struct RequestRecord {
     /// True when the runtime answered JSON to a stream request (no SSE):
     /// the whole generation arrived at once and TTFT == E2E by construction.
     pub non_streamed: bool,
+    /// Observed reusable-prefix tokens the runtime reports it served from
+    /// cache (llama.cpp `timings.cache_n` / `cached_tokens`). None = the
+    /// runtime exposes no such telemetry — never inferred from a fast
+    /// TTFT; expected reuse lives in the scenario, not here.
+    pub reused_tokens: Option<u64>,
 }
 
 impl RequestRecord {
@@ -177,6 +182,13 @@ pub struct Summary {
     pub output_tok_s: f64,
     pub prompt_tokens_total: u64,
     pub input_tok_s: f64,
+    /// Observed reusable-prefix tokens served from cache, summed over
+    /// requests that exposed the telemetry (None = runtime exposes none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reused_tokens_total: Option<u64>,
+    /// How many requests carried cache-reuse telemetry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_observed_requests: Option<usize>,
 }
 
 impl Summary {
@@ -221,6 +233,9 @@ impl Summary {
 
         let output_total: u64 = records.iter().map(|r| r.completion_tokens).sum();
         let prompt_total: u64 = records.iter().filter_map(|r| r.prompt_tokens).sum();
+        let reused_seen: Vec<u64> = records.iter().filter_map(|r| r.reused_tokens).collect();
+        let reused_total =
+            (!reused_seen.is_empty()).then_some(reused_seen.iter().sum::<u64>());
 
         Self {
             scenario: scenario.to_string(),
@@ -240,6 +255,8 @@ impl Summary {
             output_tok_s: output_total as f64 / wall,
             prompt_tokens_total: prompt_total,
             input_tok_s: prompt_total as f64 / wall,
+            reused_tokens_total: reused_total,
+            cache_observed_requests: (!reused_seen.is_empty()).then_some(reused_seen.len()),
         }
     }
 
@@ -297,13 +314,21 @@ impl Summary {
             )
             .unwrap();
         }
+        if let (Some(total), Some(n)) = (self.reused_tokens_total, self.cache_observed_requests) {
+            writeln!(
+                s,
+                "cache reuse   {} tokens over {} request(s) reporting telemetry",
+                total, n
+            )
+            .unwrap();
+        }
         s
     }
 
     /// Per-request rows for spreadsheet-friendly analysis.
     pub fn records_csv(records: &[RequestRecord]) -> String {
         let mut s = String::from(
-            "id,ok,error,ttft_ms,e2e_ms,completion_ms,completion_tokens,prompt_tokens,tpot_ms,output_tok_s,itl_p50_ms,itl_p95_ms,itl_p99_ms,max_gap_ms,release_offset_ms\n",
+            "id,ok,error,ttft_ms,e2e_ms,completion_ms,completion_tokens,prompt_tokens,reused_tokens,tpot_ms,output_tok_s,itl_p50_ms,itl_p95_ms,itl_p99_ms,max_gap_ms,release_offset_ms\n",
         );
         for r in records {
             let tpot = r.tpot_ms().map(|v| format!("{v:.2}")).unwrap_or_default();
@@ -334,7 +359,7 @@ impl Summary {
                 .map(|v| format!("{v:.2}"))
                 .unwrap_or_default();
             s.push_str(&format!(
-                "{},{},{},{:.2},{:.2},{},{},{},{},{},{},{},{},{},{}\n",
+                "{},{},{},{:.2},{:.2},{},{},{},{},{},{},{},{},{},{},{}\n",
                 r.id,
                 r.ok,
                 err,
@@ -343,6 +368,7 @@ impl Summary {
                 comp,
                 r.completion_tokens,
                 r.prompt_tokens.map(|v| v.to_string()).unwrap_or_default(),
+                r.reused_tokens.map(|v| v.to_string()).unwrap_or_default(),
                 tpot,
                 tps,
                 ip(0.50),
