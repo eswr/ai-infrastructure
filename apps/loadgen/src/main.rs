@@ -64,6 +64,15 @@ struct Cli {
     /// Prompt tokens shared verbatim across all requests (prefix-cache test).
     #[arg(long)]
     shared_prefix_tokens: Option<usize>,
+    /// Pin every request to one llama.cpp slot (`id_slot`). Used by the
+    /// 4B.2 study's topology warmups to populate a specific slot's cache.
+    #[arg(long)]
+    pin_slot: Option<u32>,
+    /// Seed for prompt synthesis (scenario default 42). The 4B.2 warmups
+    /// need the measured run's exact seed: same seed = byte-identical
+    /// shared prefix (Rust StdRng synthesis).
+    #[arg(long)]
+    seed: Option<u64>,
     /// Streaming on/off; overrides the scenario file when given
     /// (e.g. `--stream false`).
     #[arg(long, value_parser = clap::builder::BoolishValueParser::new())]
@@ -89,6 +98,7 @@ fn baseline_scenario() -> Scenario {
         output_tokens: 64,
         stream: true,
         shared_prefix_tokens: 0,
+        id_slot: None,
         arrival: Arrival::Burst,
         timeout_s: 300.0,
         seed: 42,
@@ -121,6 +131,12 @@ fn build_scenario(cli: &Cli) -> Result<Scenario> {
     }
     if let Some(v) = cli.shared_prefix_tokens {
         s.shared_prefix_tokens = v;
+    }
+    if cli.pin_slot.is_some() {
+        s.id_slot = cli.pin_slot;
+    }
+    if let Some(v) = cli.seed {
+        s.seed = v;
     }
     if let Some(v) = cli.arrival.as_deref() {
         s.arrival = parse_arrival(v)?;
@@ -271,6 +287,7 @@ async fn run_matrix(client: &reqwest::Client, path: &str, out_dir: &str) -> Resu
                 "stream": scenario.stream,
                 "shared_prefix_tokens": scenario.shared_prefix_tokens,
                 "expected_reuse_tokens": scenario.shared_prefix_tokens,
+                "id_slot": scenario.id_slot,
                 "prefix_fingerprint": format!(
                     "{:016x}",
                     inference_lab_workload::prefix_fingerprint(&scenario)

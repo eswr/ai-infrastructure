@@ -4,6 +4,7 @@ MATRIX ?= mlx-prompt-concurrency
 
 .PHONY: setup build build-release test fmt clippy bench matrix analyze failcheck lifecycle-check \
         experiment-admission-saturation experiment-cross-runtime experiment-prefix-cache \
+        experiment-prefix-router \
         worker-mlx worker-llama worker-vllm worker-mock gateway \
         up down obs-logs k8s
 
@@ -77,6 +78,9 @@ experiment-cross-runtime: build-release ## matched mlx-lm vs llama.cpp vs vllm-m
 
 experiment-prefix-cache: build-release ## phase-4B: cold vs warm prefix reuse on llama.cpp (~45 min, real GPU)
 	python3 benchmarks/prefix_cache.py --runtime llama-cpp
+
+experiment-prefix-router: build-release ## phase-4B.2: load-gated prefix routing, 4 policies x 4 cache topologies (~1.5 h, real GPU)
+	python3 benchmarks/prefix_router.py --runtime llama-cpp --two-prefix
 
 # -------------------------------------------------------- observability --
 

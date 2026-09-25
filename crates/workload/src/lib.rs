@@ -40,6 +40,11 @@ pub struct Scenario {
     /// experiments). 0 disables.
     #[serde(default)]
     pub shared_prefix_tokens: usize,
+    /// Pin every request to one llama.cpp slot (`id_slot` on the wire).
+    /// The 4B.2 topology warmups use this to populate a specific slot's
+    /// cache; 0/absent lets the server (or the gateway) choose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_slot: Option<u32>,
     pub arrival: Arrival,
     #[serde(default = "default_timeout")]
     pub timeout_s: f64,
@@ -92,6 +97,8 @@ impl Scenario {
             temperature: 1.0,
             top_p: None,
             include_usage: true,
+            id_slot: self.id_slot,
+            cache_prompt: self.id_slot.map(|_| true),
         }
     }
 }
@@ -202,10 +209,25 @@ mod tests {
             output_tokens: 16,
             stream: true,
             shared_prefix_tokens: 100,
+            id_slot: None,
             arrival: Arrival::Poisson { mean_interval_s: 0.1 },
             timeout_s: 10.0,
             seed: 7,
         }
+    }
+
+    #[test]
+    fn pinned_slot_lands_on_the_wire() {
+        let mut s = scenario();
+        s.id_slot = Some(3);
+        let req = s.request(0);
+        assert_eq!(req.id_slot, Some(3));
+        assert_eq!(req.cache_prompt, Some(true));
+        // Unpinned scenarios serialize nothing: the wire format is
+        // unchanged for every other runtime.
+        let req = scenario().request(0);
+        assert_eq!(req.id_slot, None);
+        assert_eq!(req.cache_prompt, None);
     }
 
     #[test]

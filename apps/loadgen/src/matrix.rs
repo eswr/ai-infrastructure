@@ -56,6 +56,9 @@ pub struct RunSpec {
     pub stream: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_prefix_tokens: Option<usize>,
+    /// Pin all of this run's requests to one llama.cpp slot (`id_slot`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_slot: Option<u32>,
     /// burst | constant:<interval_s> | poisson:<mean_interval_s>
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrival: Option<String>,
@@ -93,6 +96,9 @@ impl RunSpec {
         }
         if let Some(v) = self.shared_prefix_tokens.or(defaults.shared_prefix_tokens) {
             s.shared_prefix_tokens = v;
+        }
+        if self.id_slot.or(defaults.id_slot).is_some() {
+            s.id_slot = self.id_slot.or(defaults.id_slot);
         }
         if let Some(v) = self.arrival.as_ref().or(defaults.arrival.as_ref()) {
             s.arrival = parse_arrival(v)?;
@@ -170,6 +176,7 @@ mod tests {
             output_tokens: 64,
             stream: true,
             shared_prefix_tokens: 0,
+            id_slot: None,
             arrival: Arrival::Burst,
             timeout_s: 300.0,
             seed: 42,
