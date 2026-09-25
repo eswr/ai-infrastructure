@@ -16,6 +16,20 @@ process + system memory the whole time, and writes a lifecycle record
 that answers, per runtime: what did /health say, did a real generation
 actually work, and was a restart needed after the worst workload?
 
+Phase 4B added the cache dimension to the same contract:
+
+    reset_cache()   the only reset that is honest on every runtime: a
+                    process restart (the KV/prefix cache IS process
+                    state; llama.cpp 0.4.1 implements no erase action
+                    and vllm-metal exposes no reset endpoint)
+    warm_prefix()   populate the runtime's reusable prefix state by
+                    firing `slots` concurrent throwaway requests —
+                    llama.cpp caches are slot-local, so a single warm
+                    request only warms one slot
+
+Every experiment records `cache_reset_method` / `cache_warm_method` so
+cold/warm comparisons are reproducible.
+
 Usage:
     python3 benchmarks/runtime_harness.py run   --runtime mlx-lm \
         --matrix experiments/cross-runtime/mlx-lm.toml \
@@ -41,6 +55,7 @@ import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -155,6 +170,7 @@ class Runtime(ABC):
     # -- shared lifecycle --------------------------------------------------
 
     def start(self, log_path: Path) -> None:
+        self._log_path = log_path
         self.log_fh = log_path.open("ab")
         env = {**os.environ, **self.start_env()}
         self.proc = subprocess.Popen(
@@ -262,6 +278,98 @@ class Runtime(ABC):
         ]
         return {"available": True, "excerpt": keep[:40]}
 
+    # -- cache lifecycle (phase 4B) ------------------------------------------
+
+    def cache_reset_method(self) -> str:
+        """How this runtime's reusable-prefix state is reset, verbatim for
+        the experiment manifest."""
+        return "process_restart"
+
+    def cache_warm_method(self) -> str:
+        """How the reusable prefix state is populated, for the manifest."""
+        return f"concurrent_warm_requests(slots={self.warm_slots()})"
+
+    def warm_slots(self) -> int:
+        """How many independent cache partitions need warming. llama.cpp:
+        one per slot (slot-local caches); single-loop runtimes: 1."""
+        return 1
+
+    def reset_cache(self) -> bool:
+        """Reset reusable-prefix state to empty. A process restart is the
+        one method that is honest everywhere: the cache IS process state,
+        llama.cpp 0.4.1 ships no erase action (POST /slots/N?action=erase
+        answers 501) and vllm-metal 0.1.0 exposes no reset endpoint at
+        all. Returns True when the runtime is live again afterwards."""
+        log_path = getattr(self, "_log_path", None) or Path("/tmp/runtime-cache-reset.log")
+        self.stop()
+        time.sleep(2)
+        self.start(log_path)
+        return self.wait_live(LIVE_TIMEOUT_S)
+
+    def warm_prefix(self, build_prompt: Callable[[], dict], slots: int | None = None,
+                    timeout_s: float = 600.0) -> dict:
+        """Populate the runtime's reusable prefix state: fire `slots`
+        concurrent throwaway requests carrying a shared prefix, one per
+        cache partition. llama.cpp caches are slot-local, so warming a
+        single request leaves c>1 runs mostly cold. Returns a small stats
+        dict (reuse telemetry seen during warming, when the runtime
+        exposes it)."""
+        slots = slots if slots is not None else self.warm_slots()
+        payload = build_prompt()
+        payload["max_tokens"] = 4
+        payload["temperature"] = 0.0
+        body = json.dumps(payload).encode()
+        url = f"http://127.0.0.1:{self.port}/v1/chat/completions"
+        results: list = []
+        lock = threading.Lock()
+
+        def one(i: int) -> None:
+            p = dict(payload)
+            p["messages"] = [
+                {"role": m["role"],
+                 "content": m["content"] + ("" if i == 0 else f" w{i}")}
+                for m in payload["messages"]
+            ]
+            req = urllib.request.Request(
+                url, data=json.dumps(p).encode(),
+                headers={"Content-Type": "application/json"})
+            t0 = time.time()
+            cache_n = None
+            try:
+                with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                    ctype = resp.headers.get("content-type", "")
+                    if "event-stream" in ctype:
+                        last = None
+                        for raw in resp:
+                            line = raw.decode("utf-8", "replace").strip()
+                            if line.startswith("data:") and "[DONE]" not in line:
+                                last = line[5:].strip()
+                        if last and "timings" in last:
+                            try:
+                                cache_n = json.loads(last).get("timings", {}).get("cache_n")
+                            except json.JSONDecodeError:
+                                pass
+                    else:
+                        d = json.loads(resp.read().decode("utf-8", "replace"))
+                        cache_n = d.get("timings", {}).get("cache_n")
+            except Exception as e:
+                with lock:
+                    results.append({"slot": i, "ok": False, "error": str(e)})
+                return
+            with lock:
+                results.append({"slot": i, "ok": True,
+                                "s": round(time.time() - t0, 2), "cache_n": cache_n})
+
+        threads = [threading.Thread(target=one, args=(i,)) for i in range(slots)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        ok = [r for r in results if r["ok"]]
+        log(f"{self.name}: warmed {len(ok)}/{slots} cache partitions "
+            f"(cache_n seen: {[r.get('cache_n') for r in ok]})")
+        return {"requested": slots, "warmed": len(ok), "results": results}
+
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
@@ -347,6 +455,12 @@ class LlamaCppRuntime(Runtime):
 
     def metrics_url(self) -> str | None:
         return f"http://127.0.0.1:{self.port}/metrics"
+
+    def warm_slots(self) -> int:
+        # Slot-local KV caches: a single warm request leaves c>1 runs
+        # mostly cold. Measured live on 0.4.1: two concurrent same-prefix
+        # requests -> cache_n=396 and cache_n=0 on different slots.
+        return self.parallel
 
     def info(self) -> dict:
         return {**super().info(), "gguf": self.gguf, "ctx": self.ctx, "parallel_slots": self.parallel}
@@ -587,7 +701,9 @@ def run_study(rt: Runtime, matrix: Path, out_dir: Path, gateway_bin: Path) -> in
     rt_dir.mkdir(parents=True, exist_ok=True)
     sampler = MemorySampler(lambda: rt.proc.pid if rt.proc else None, rt_dir / "memory.csv")
     sampler.start()
-    lifecycle: dict = {"runtime": rt.name, "gateway_first_token_timeout_s": 900, "phases": []}
+    lifecycle: dict = {"runtime": rt.name, "gateway_first_token_timeout_s": 900, "phases": [],
+                       "cache_reset_method": rt.cache_reset_method(),
+                       "cache_warm_method": rt.cache_warm_method()}
 
     def record(probe: Probe, extra: dict | None = None) -> None:
         entry = probe.to_json() | {"verdict": classify(probe, rt.alive())} | (extra or {})
