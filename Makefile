@@ -3,7 +3,7 @@ SCENARIO ?= smoke
 MATRIX ?= mlx-prompt-concurrency
 
 .PHONY: setup build build-release test fmt clippy bench matrix analyze failcheck lifecycle-check \
-        experiment-admission-saturation experiment-cross-runtime \
+        experiment-admission-saturation experiment-cross-runtime experiment-prefix-cache \
         worker-mlx worker-llama worker-vllm worker-mock gateway \
         up down obs-logs k8s
 
@@ -74,6 +74,9 @@ experiment-admission-saturation: build-release ## the centerpiece A/B: unbounded
 
 experiment-cross-runtime: build-release ## matched mlx-lm vs llama.cpp vs vllm-metal, 3×3 grid (~2-3 h; RT=<runtime> for one leg)
 	bash experiments/cross-runtime/run.sh $(RT)
+
+experiment-prefix-cache: build-release ## phase-4B: cold vs warm prefix reuse on llama.cpp (~45 min, real GPU)
+	python3 benchmarks/prefix_cache.py --runtime llama-cpp
 
 # -------------------------------------------------------- observability --
 

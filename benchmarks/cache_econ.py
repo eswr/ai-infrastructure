@@ -41,29 +41,24 @@ def fmt_ms(v: float | None) -> str:
 
 
 def load_leg(leg_dir: Path) -> dict | None:
-    mj = leg_dir / "matrix.json"
-    if not mj.exists():
+    mj_files = sorted(leg_dir.glob("*/matrix.json"))
+    if not mj_files:
         return None
-    data = json.loads(mj.read_text())
+    data = json.loads(mj_files[-1].read_text())
     rows = [r for r in data.get("rows", []) if not r.get("warmup")]
     if not rows:
         return None
     row = rows[-1]
-    recs_path = sorted(leg_dir.glob("*.records.json")) or sorted(leg_dir.glob("*-*.json"))
-    # records live in <leg>.json written by loadgen (summary+records)
-    reused = []
-    for jf in leg_dir.glob("*.json"):
-        if jf.name == "matrix.json":
-            continue
-        try:
-            d = json.loads(jf.read_text())
-        except json.JSONDecodeError:
-            continue
-        for rec in d.get("records", []):
-            if rec.get("reused_tokens") is not None and rec.get("ok"):
-                reused.append(rec["reused_tokens"])
     p = row["params"]
     s = row["summary"]
+    # Observed reuse from the measured run's own summary — warm legs also
+    # contain a populate warmup run whose records would dilute the mean.
+    n_obs = s.get("cache_observed_requests")
+    reused_per_req = None
+    if s.get("reused_tokens_total") is not None and n_obs:
+        reused_per_req = s["reused_tokens_total"] / n_obs
+    prompt_per_req = (s.get("prompt_tokens_total") / s["total_requests"]
+                      if s.get("prompt_tokens_total") else None)
     return {
         "leg": leg_dir.name,
         "state": leg_dir.name.rsplit("-c", 1)[0],
@@ -76,11 +71,12 @@ def load_leg(leg_dir: Path) -> dict | None:
         "ok": s.get("successful"),
         "total": s.get("total_requests"),
         "input_tokens": p.get("input_tokens"),
+        "prompt_tokens_server": prompt_per_req,
         "shared_prefix_tokens": p.get("shared_prefix_tokens"),
         "prefix_fingerprint": p.get("prefix_fingerprint"),
         "reused_total": s.get("reused_tokens_total"),
-        "reused_n": s.get("cache_observed_requests"),
-        "reused_per_req": (sum(reused) / len(reused)) if reused else None,
+        "reused_n": n_obs,
+        "reused_per_req": reused_per_req,
     }
 
 
@@ -109,6 +105,8 @@ def frozen_off_rows(path: Path, runtime: str, prompt: int) -> dict[int, dict]:
             "ok": s.get("successful"),
             "total": s.get("total_requests"),
             "input_tokens": p.get("input_tokens"),
+            "prompt_tokens_server": (s.get("prompt_tokens_total") / s["total_requests"]
+                                     if s.get("prompt_tokens_total") else None),
             "shared_prefix_tokens": 0,
             "reused_per_req": 0,
             "reused_total": 0,
@@ -177,18 +175,26 @@ def main() -> int:
             saved = cold["ttft_p50_ms"] - warm["ttft_p50_ms"]
         per_tok = None
         eff_prefill = None
-        if saved is not None and warm["reused_per_req"]:
-            per_tok = saved / warm["reused_per_req"]
-        if warm["reused_per_req"] and warm["input_tokens"]:
-            eff_prefill = warm["input_tokens"] - warm["reused_per_req"]
+        # cache_n counts cache POSITIONS (chat template + decode offsets),
+        # so it can exceed the API prompt size; economics caps observed
+        # reuse at the server-reported prompt. Raw counters stay in legs.
+        prompt_real = warm["prompt_tokens_server"] or warm["input_tokens"]
+        reused_eff = min(warm["reused_per_req"], prompt_real) if (
+            warm["reused_per_req"] is not None and prompt_real) else None
+        if saved is not None and reused_eff:
+            per_tok = saved / reused_eff
+        if reused_eff is not None:
+            eff_prefill = prompt_real - reused_eff
         econ[c] = {
             "ttft_saved_ms": saved,
-            "warm_mean_reused_tokens": warm["reused_per_req"],
+            "warm_mean_reused_tokens": reused_eff,
+            "warm_mean_reused_raw_cache_n": warm["reused_per_req"],
+            "server_prompt_tokens": prompt_real,
             "ms_saved_per_cached_token": per_tok,
             "effective_prefill_tokens_per_req": eff_prefill,
             "effective_prefill_fraction": (
-                eff_prefill / warm["input_tokens"]
-                if eff_prefill is not None and warm["input_tokens"] else None
+                eff_prefill / prompt_real
+                if eff_prefill is not None and prompt_real else None
             ),
         }
 
@@ -211,15 +217,15 @@ def main() -> int:
             f"| {fmt_ms(l['spread_ms'])} | {reused} |")
     md += ["", "## What the cache bought", "",
            "| c | TTFT saved (cold−warm) | Warm reused tok/req | ms saved per cached token "
-           "| Effective prefill tok/req | Effective prefill share |",
-           "| -:" + "|---" * 5 + "|"]
+           "| Effective prefill tok/req (share of server prompt) |",
+           "| -:" + "|---" * 4 + "|"]
     for c in sorted(econ):
         e = econ[c]
         saved = fmt_ms(e["ttft_saved_ms"]) if e["ttft_saved_ms"] is not None else "n/a"
-        per_tok = f"{e['ms_saved_per_cached_token']:.2f}" if e["ms_saved_per_cached_token"] else "n/a"
-        eff = f"{e['effective_prefill_tokens_per_req']:.0f}" if e["effective_prefill_tokens_per_req"] else "n/a"
-        share = f"{e['effective_prefill_fraction'] * 100:.1f}%" if e["effective_prefill_fraction"] else "n/a"
-        md.append(f"| {c} | {saved} | {e['warm_mean_reused_tokens']:.0f} | {per_tok} | {eff} | {share} |")
+        per_tok = f"{e['ms_saved_per_cached_token']:.2f}" if e["ms_saved_per_cached_token"] is not None else "n/a"
+        eff = e["effective_prefill_tokens_per_req"]
+        eff_s = "n/a" if eff is None else f"{eff:.0f} ({e['effective_prefill_fraction'] * 100:.1f}%)"
+        md.append(f"| {c} | {saved} | {e['warm_mean_reused_tokens']:.0f} | {per_tok} | {eff_s} |")
 
     if phases:
         md += ["", "## Memory footprint by checkpoint (vmmap, MB)", "",

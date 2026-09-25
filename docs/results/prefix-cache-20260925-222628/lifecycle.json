@@ -1,0 +1,226 @@
+{
+  "study": "prefix-cache-reuse",
+  "created": "20260925-222628",
+  "runtime": "llama-cpp",
+  "model": "Qwen3.5-9B-Q4_K_M.gguf",
+  "workload": {
+    "shared_prefix_tokens": 8192,
+    "unique_suffix_tokens": 128,
+    "output_tokens": 256,
+    "num_requests": 8,
+    "seed": 42,
+    "stream": true,
+    "arrival": "burst",
+    "via_gateway": true
+  },
+  "cache_reset_method": "process_restart",
+  "cache_warm_method": "loadgen warmup run, concurrency=8, out=4, direct-to-worker; same seed as measured runs so the shared prefix is byte-identical (Rust StdRng prefix synthesis)",
+  "legs": [
+    {
+      "leg": "cold-c1",
+      "c": 1,
+      "state": "cold",
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "state": "ready",
+        "generation": 1
+      },
+      "run_exit": 0,
+      "run_wall_s": 250.6,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 464.6329879760742
+      },
+      "gateway_after": {
+        "state": "ready",
+        "reason": null,
+        "generation": 1,
+        "dimensions": {
+          "functional": "up",
+          "process": "unknown",
+          "semantic": "up",
+          "transport": "up"
+        }
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "warm-c1",
+      "c": 1,
+      "state": "warm",
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "state": "ready",
+        "generation": 1
+      },
+      "run_exit": 0,
+      "run_wall_s": 685.2,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 4133.062124252319
+      },
+      "gateway_after": {
+        "state": "ready",
+        "reason": null,
+        "generation": 1,
+        "dimensions": {
+          "functional": "up",
+          "process": "unknown",
+          "semantic": "up",
+          "transport": "up"
+        }
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "cold-c4",
+      "c": 4,
+      "state": "cold",
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "state": "ready",
+        "generation": 1
+      },
+      "run_exit": 0,
+      "run_wall_s": 395.4,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 2355.2072048187256
+      },
+      "gateway_after": {
+        "state": "ready",
+        "reason": null,
+        "generation": 12,
+        "dimensions": {
+          "functional": "up",
+          "process": "unknown",
+          "semantic": "up",
+          "transport": "up"
+        }
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "warm-c4",
+      "c": 4,
+      "state": "warm",
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "state": "ready",
+        "generation": 1
+      },
+      "run_exit": 0,
+      "run_wall_s": 641.6,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 13425.793886184692
+      },
+      "gateway_after": {
+        "state": "ready",
+        "reason": null,
+        "generation": 1,
+        "dimensions": {
+          "functional": "up",
+          "process": "unknown",
+          "semantic": "up",
+          "transport": "up"
+        }
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "cold-c8",
+      "c": 8,
+      "state": "cold",
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "state": "ready",
+        "generation": 1
+      },
+      "run_exit": 0,
+      "run_wall_s": 488.5,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 4401.479005813599
+      },
+      "gateway_after": {
+        "state": "ready",
+        "reason": null,
+        "generation": 36,
+        "dimensions": {
+          "functional": "up",
+          "process": "unknown",
+          "semantic": "up",
+          "transport": "up"
+        }
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "warm-c8",
+      "c": 8,
+      "state": "warm",
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "state": "ready",
+        "generation": 1
+      },
+      "run_exit": 0,
+      "run_wall_s": 504.3,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 10867.842674255371
+      },
+      "gateway_after": {
+        "state": "ready",
+        "reason": null,
+        "generation": 38,
+        "dimensions": {
+          "functional": "up",
+          "process": "unknown",
+          "semantic": "up",
+          "transport": "up"
+        }
+      },
+      "verdict": "healthy"
+    }
+  ],
+  "memory_peak_rss_mb": 10945.0,
+  "memory_peak_footprint_mb": 10444.8
+}
