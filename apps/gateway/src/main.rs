@@ -1,15 +1,25 @@
 //! gateway — OpenAI-compatible inference edge in front of the lab's workers.
 //!
-//! Request path (phase 3):
+//! Request path (phase 4D):
 //!
 //! ```text
 //! request → estimate tokens → admission control (budget by estimated work;
 //!           queue with token/seconds accounting, or 429 + Retry-After when
 //!           overloaded) → scheduler (LOR / adaptive ECT / prefix affinity,
-//!           health-aware, re-route on connect failure) → worker →
+//!           lifecycle-aware, re-route on connect failure) → worker →
 //!           instrumented stream (TTFT decomposition, ITL, token counts,
-//!           OTel spans) → client
+//!           first-token + mid-stream stall watchdogs, OTel spans) → client
 //! ```
+//!
+//! Worker lifecycle: every worker walks STARTING → WARMING → READY before
+//! it receives traffic, driven by a `/health` transport poll AND a tiny
+//! real-generation functional probe (`/health` 200 alone is never READY —
+//! the phase-4A mlx-lm silent wedge answered /health for hours). Failures
+//! escalate by reason class (immediate quarantine for probe timeouts and
+//! process death; 3-strike accumulation for connect/empty/stall), recovery
+//! requires repeated probe passes, and each restart begins a new generation
+//! epoch. Admin surface: `POST /admin/workers/{id}/drain`,
+//! `POST /admin/workers/{id}/probe`.
 //!
 //! Every request leaves: a distributed trace (OTLP → collector → Tempo),
 //! Prometheus metrics (`/metrics`), and log lines correlated by trace id
@@ -28,13 +38,22 @@
 //! * `ADMIT_MAX_WORK_MS`  per-request estimated-work cap, 0 = off
 //! * `ADMIT_DEGRADED_QUEUE_S` / `ADMIT_OVERLOADED_QUEUE_S` (5 / 30)
 //! * `FIRST_TOKEN_TIMEOUT_S` abort streams with no first token (0 = off)
-//! * `HEALTH_INTERVAL_S`  worker /health probe interval (default 5)
+//! * `STREAM_STALL_TIMEOUT_S` abort streams that stop producing tokens
+//!   mid-generation (0 = off; the 193 s mlx-lm stall detector)
+//! * `HEALTH_INTERVAL_S`  worker /health transport-poll interval (default 5)
+//! * `FUNCTIONAL_PROBE_INTERVAL_S`        probe cadence for non-READY
+//!   workers (default 5) — the restart-to-READY latency
+//! * `FUNCTIONAL_PROBE_INTERVAL_READY_S`  steady-state probe cadence for
+//!   READY workers (default 30, 0 = off — the silent-wedge detector; set 0
+//!   for measured benchmark runs)
+//! * `FUNCTIONAL_PROBE_TIMEOUT_S` (10) / `FUNCTIONAL_PROBE_MAX_TOKENS` (2)
 //! * `PROFILE_FIXED_MS` / `PROFILE_PREFILL_MS_PER_TOK` /
 //!   `PROFILE_DECODE_MS_PER_TOK`  service-model seeds (phase-2 defaults:
 //!   750 / 5.35 / 76)
 //! * `OTEL_EXPORTER_OTLP_ENDPOINT`  enables OTLP export (e.g. http://127.0.0.1:4318)
 
 mod admission;
+mod lifecycle;
 mod metrics;
 mod proxy;
 mod telemetry;
@@ -43,7 +62,7 @@ use admission::{
     AdmissionController, AdmissionDecision, AdmissionPolicy, RequestSize, TokenEstimator,
 };
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -52,6 +71,7 @@ use inference_lab_protocol::ChatCompletionRequest;
 use inference_lab_scheduler::{
     RequestShape, Router as WorkerRouter, SelectOutcome, ServiceDefaults, WorkerHandle,
 };
+use inference_lab_worker_lifecycle::{Dimension, FailureReason, WorkerState};
 use metrics::Metrics;
 use opentelemetry::trace::{SpanKind, TraceContextExt};
 use opentelemetry::KeyValue;
@@ -68,6 +88,8 @@ struct AppState {
     admission: Arc<AdmissionController>,
     estimator: Arc<TokenEstimator>,
     first_token_timeout: Option<Duration>,
+    stream_stall_timeout: Option<Duration>,
+    lifecycle_cfg: lifecycle::LifecycleConfig,
 }
 
 fn error_json(status: StatusCode, msg: &str) -> Response {
@@ -307,11 +329,15 @@ async fn chat_completions(
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
                 st.metrics.worker_errors_total.with_label_values(&[&worker.id, "http"]).inc();
-                if status.is_server_error() && worker.record_dispatch_failure() {
-                    tracing::warn!(worker = %worker.id, "worker marked unhealthy (HTTP {status})");
-                }
+                // The worker answered at transport level but refused
+                // service — accumulating-class failure (3 strikes
+                // quarantine; one blip degrades without flapping).
+                let transitions =
+                    worker.record_failure(Dimension::Transport, FailureReason::ConnectFailed);
+                st.metrics.record_transitions(&worker, &transitions);
                 worker.end_work(work_start, est_total);
-                worker.dec_outstanding();
+                let drained = worker.dec_outstanding();
+                st.metrics.record_transitions(&worker, &drained);
                 worker_span.span().set_attribute(KeyValue::new(
                     "inference.outcome",
                     "upstream_http_error",
@@ -336,11 +362,12 @@ async fn chat_completions(
             }
             Err(e) => {
                 st.metrics.worker_errors_total.with_label_values(&[&worker.id, "connect"]).inc();
-                if worker.record_dispatch_failure() {
-                    tracing::warn!(worker = %worker.id, "worker marked unhealthy (connect failures)");
-                }
+                let transitions =
+                    worker.record_failure(Dimension::Transport, FailureReason::ConnectFailed);
+                st.metrics.record_transitions(&worker, &transitions);
                 worker.end_work(work_start, est_total);
-                worker.dec_outstanding();
+                let drained = worker.dec_outstanding();
+                st.metrics.record_transitions(&worker, &drained);
                 worker_span.span().set_attribute(KeyValue::new("inference.outcome", "upstream_error"));
                 worker_span.span().set_attribute(KeyValue::new("inference.error", format!("{e}")));
                 worker_span.span().end();
@@ -408,6 +435,7 @@ async fn chat_completions(
             streaming: None,
         },
         first_token_deadline: st.first_token_timeout.map(|t| Instant::now() + t),
+        stream_stall_timeout: st.stream_stall_timeout,
         stream_mode,
         work_estimate: (work_start, est_total),
         est_total_ms: est_total,
@@ -450,12 +478,29 @@ async fn status(State(st): State<Arc<AppState>>) -> Response {
         .workers()
         .iter()
         .map(|w| {
+            let cond = w.condition();
             serde_json::json!({
                 "id": w.id,
                 "endpoint": w.endpoint,
                 "runtime": w.runtime,
                 "model": w.model,
+                // "healthy" = receives traffic (READY or DEGRADED).
                 "healthy": w.is_healthy(),
+                "state": cond.state.as_str(),
+                "state_reason": cond.reason.map(|r| r.as_str()),
+                "state_since_s": cond.since.elapsed().as_secs_f64(),
+                "generation": cond.generation,
+                "consecutive_failures": cond.consecutive_failures,
+                "transitions_total": w.total_transitions(),
+                "dimensions": {
+                    "process": cond.dimension(inference_lab_worker_lifecycle::Dimension::Process).as_str(),
+                    "transport": cond.dimension(inference_lab_worker_lifecycle::Dimension::Transport).as_str(),
+                    "functional": cond.dimension(inference_lab_worker_lifecycle::Dimension::Functional).as_str(),
+                    "semantic": cond.dimension(inference_lab_worker_lifecycle::Dimension::Semantic).as_str(),
+                },
+                "last_success_age_s": cond
+                    .last_success
+                    .map(|t| t.elapsed().as_secs_f64()),
                 "outstanding": w.outstanding(),
                 "prefill_ms_per_token": w.prefill_ms_per_tok(),
                 "fixed_overhead_ms": w.fixed_overhead_ms(),
@@ -482,6 +527,54 @@ async fn status(State(st): State<Arc<AppState>>) -> Response {
     .into_response()
 }
 
+/// Stop assigning new work to a worker; in-flight requests finish. The
+/// worker's lifecycle moves READY/DEGRADED → DRAINING, and once the last
+/// outstanding request completes, DRAINING → STOPPED.
+async fn drain_worker(State(st): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let Some(w) = st.router.workers().iter().find(|w| w.id == id) else {
+        return error_json(StatusCode::NOT_FOUND, &format!("unknown worker {id}"));
+    };
+    let transitions = w.drain();
+    st.metrics.record_transitions(w, &transitions);
+    let cond = w.condition();
+    Json(serde_json::json!({
+        "worker": w.id,
+        "state": cond.state.as_str(),
+        "generation": cond.generation,
+        "outstanding": w.outstanding(),
+    }))
+    .into_response()
+}
+
+/// Run one functional probe immediately (the readiness contract: a tiny
+/// real generation). Useful after config changes and in tests.
+async fn probe_worker(State(st): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let Some(w) = st.router.workers().iter().find(|w| w.id == id) else {
+        return error_json(StatusCode::NOT_FOUND, &format!("unknown worker {id}"));
+    };
+    let (obs, dur) = lifecycle::run_functional_probe(&st.client, w, &st.lifecycle_cfg).await;
+    st.metrics
+        .worker_functional_probe_seconds
+        .with_label_values(&[w.id.as_str()])
+        .observe(dur.as_secs_f64());
+    let transitions = w.observe(&obs);
+    st.metrics.record_transitions(w, &transitions);
+    let cond = w.condition();
+    Json(serde_json::json!({
+        "worker": w.id,
+        "probe": {
+            "ok": obs.ok,
+            "dimension": obs.dimension.as_str(),
+            "reason": obs.reason.map(|r| r.as_str()),
+            "detail": obs.detail,
+            "elapsed_s": dur.as_secs_f64(),
+        },
+        "state": cond.state.as_str(),
+        "generation": cond.generation,
+    }))
+    .into_response()
+}
+
 async fn metrics_endpoint(State(st): State<Arc<AppState>>) -> Response {
     match st.metrics.encode() {
         Ok(buf) => (
@@ -496,7 +589,10 @@ async fn metrics_endpoint(State(st): State<Arc<AppState>>) -> Response {
 async fn root() -> Response {
     Json(serde_json::json!({
         "service": "inference-lab gateway",
-        "endpoints": ["/v1/chat/completions", "/v1/models", "/healthz", "/status", "/metrics"],
+        "endpoints": [
+            "/v1/chat/completions", "/v1/models", "/healthz", "/status", "/metrics",
+            "/admin/workers/{id}/drain", "/admin/workers/{id}/probe"
+        ],
     }))
     .into_response()
 }
@@ -518,6 +614,7 @@ async fn gauge_sampler(st: Arc<AppState>) {
         m.load_state.set(s.load_state as i64);
         for w in st.router.workers() {
             let id = w.id.as_str();
+            let cond = w.condition();
             m.workers_healthy.with_label_values(&[id]).set(w.is_healthy() as i64);
             m.worker_outstanding.with_label_values(&[id]).set(w.outstanding() as i64);
             m.worker_prefill_ms_per_tok
@@ -532,34 +629,17 @@ async fn gauge_sampler(st: Arc<AppState>) {
             m.worker_remaining_work_seconds
                 .with_label_values(&[id])
                 .set((w.remaining_work_ms() / 1000.0) as i64);
-        }
-    }
-}
-
-/// Background worker health probes: /health failures count toward the same
-/// consecutive-failure threshold as dispatch failures.
-async fn health_poller(st: Arc<AppState>, interval: Duration) {
-    let mut tick = tokio::time::interval(interval);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tick.tick().await;
-        for w in st.router.workers() {
-            let url = format!("{}/health", w.endpoint.trim_end_matches('/'));
-            let ok = match st
-                .client
-                .get(&url)
-                .timeout(Duration::from_secs(2))
-                .send()
-                .await
-            {
-                Ok(r) => r.status().is_success(),
-                Err(_) => false,
-            };
-            if ok {
-                w.record_success();
-            } else if w.record_dispatch_failure() {
-                tracing::warn!(worker = %w.id, "health probe failing — worker marked unhealthy");
+            // Lifecycle: one-hot state vector per worker + failure/epoch
+            // gauges. The state gauge is the Grafana timeline's source.
+            for s in WorkerState::all() {
+                m.worker_state
+                    .with_label_values(&[id, &w.runtime, s.as_str()])
+                    .set((cond.state == s) as i64);
             }
+            m.worker_consecutive_failures
+                .with_label_values(&[id])
+                .set(cond.consecutive_failures as i64);
+            m.worker_generation.with_label_values(&[id]).set(cond.generation as i64);
         }
     }
 }
@@ -630,6 +710,8 @@ async fn main() -> anyhow::Result<()> {
     let router = Arc::new(WorkerRouter::new(handles, policy)?);
     let admission = AdmissionController::new(admission_policy);
     let first_token_timeout = env_f64("FIRST_TOKEN_TIMEOUT_S", 0.0);
+    let stream_stall_timeout = env_f64("STREAM_STALL_TIMEOUT_S", 0.0);
+    let lifecycle_cfg = lifecycle::LifecycleConfig::from_env();
     let state = Arc::new(AppState {
         router: router.clone(),
         client: reqwest::Client::builder()
@@ -640,11 +722,15 @@ async fn main() -> anyhow::Result<()> {
         estimator: Arc::new(TokenEstimator::new()),
         first_token_timeout: (first_token_timeout > 0.0)
             .then(|| Duration::from_secs_f64(first_token_timeout)),
+        stream_stall_timeout: (stream_stall_timeout > 0.0)
+            .then(|| Duration::from_secs_f64(stream_stall_timeout)),
+        lifecycle_cfg: lifecycle_cfg.clone(),
     });
 
     let health_interval = Duration::from_secs_f64(env_f64("HEALTH_INTERVAL_S", 5.0).max(0.5));
     tokio::spawn(gauge_sampler(state.clone()));
-    tokio::spawn(health_poller(state.clone(), health_interval));
+    tokio::spawn(lifecycle::transport_poller(state.clone(), health_interval));
+    tokio::spawn(lifecycle::functional_prober(state.clone(), lifecycle_cfg));
 
     let app = Router::new()
         .route("/", get(root))
@@ -653,6 +739,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/metrics", get(metrics_endpoint))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/admin/workers/{id}/drain", post(drain_worker))
+        .route("/admin/workers/{id}/probe", post(probe_worker))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;

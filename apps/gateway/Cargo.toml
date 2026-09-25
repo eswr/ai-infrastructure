@@ -12,6 +12,7 @@ path = "src/main.rs"
 inference-lab-protocol = { workspace = true }
 inference-lab-scheduler = { workspace = true }
 inference-lab-streaming = { workspace = true }
+inference-lab-worker-lifecycle = { workspace = true }
 
 tokio = { workspace = true }
 serde_json = { workspace = true }

@@ -24,11 +24,20 @@
 //! * [`RoutingPolicy::PrefixAffinity`] — prefers workers that already served
 //!   (and therefore plausibly cached) the same prompt prefix.
 //!
-//! Workers also track health: dispatch failures accumulate and eventually
-//! mark a worker unhealthy so it receives no new traffic until it recovers.
+//! Workers also carry a full lifecycle (see `inference-lab-worker-lifecycle`):
+//! a per-worker state machine over four health dimensions (process /
+//! transport / functional / semantic) with per-reason escalation, recovery
+//! hysteresis and generation epochs. Only READY and DEGRADED workers receive
+//! traffic; a functional probe (a tiny real generation) is required before
+//! a worker is READY — `/health` alone never suffices, the phase-4A silent
+//! wedge saw to that.
 
+use inference_lab_worker_lifecycle::{
+    FailureReason, HealthObservation, LifecyclePolicy, Transition, WorkerCondition, WorkerLifecycle,
+    WorkerState,
+};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -207,11 +216,10 @@ pub struct WorkerHandle {
     pub max_context: u64,
     /// Outstanding requests (raw count — LOR baseline and gauges).
     outstanding: AtomicU64,
-    /// Health from dispatch failures / health probe; unhealthy workers get
-    /// no new traffic.
-    pub healthy: AtomicBool,
-    consecutive_failures: AtomicU32,
-    health_fail_threshold: u32,
+    /// Lifecycle state machine: four health dimensions, per-reason
+    /// escalation, recovery hysteresis, generation epochs. READY/DEGRADED
+    /// serve traffic; everything else is quarantined.
+    lifecycle: Mutex<WorkerLifecycle>,
 
     // Adaptive service model: prefill regression + decode EWMA.
     prefill_model: OnlineRateModel,
@@ -250,9 +258,7 @@ impl WorkerHandle {
             runtime: runtime.into(),
             max_context: 0,
             outstanding: AtomicU64::new(0),
-            healthy: AtomicBool::new(true),
-            consecutive_failures: AtomicU32::new(0),
-            health_fail_threshold: 3,
+            lifecycle: Mutex::new(WorkerLifecycle::new(LifecyclePolicy::default())),
             prefill_model: OnlineRateModel::seeded(defaults.fixed_ms, defaults.prefill_ms_per_tok),
             decode_ms_per_tok: Ewma::seeded(defaults.decode_ms_per_tok),
             active_estimates: Mutex::new(Vec::new()),
@@ -268,12 +274,16 @@ impl WorkerHandle {
         self.outstanding.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn dec_outstanding(&self) {
-        self.outstanding.fetch_sub(1, Ordering::Relaxed);
-    }
-
-    pub fn is_healthy(&self) -> bool {
-        self.healthy.load(Ordering::Relaxed)
+    /// Decrement outstanding work. When a DRAINING worker's last request
+    /// finishes, the drain completes: returns the DRAINING → STOPPED
+    /// transition (normally empty).
+    pub fn dec_outstanding(&self) -> Vec<Transition> {
+        if self.outstanding.fetch_sub(1, Ordering::Relaxed) == 1 {
+            let mut lc = self.lock_lifecycle();
+            lc.notify_drained()
+        } else {
+            vec![]
+        }
     }
 
     // -- service model ------------------------------------------------------
@@ -348,26 +358,65 @@ impl WorkerHandle {
             .unwrap_or(0.0)
     }
 
-    // -- health ----------------------------------------------------------------
+    // -- lifecycle ------------------------------------------------------------
 
-    /// Record a dispatch failure. Returns true if this failure flipped the
-    /// worker unhealthy.
-    pub fn record_dispatch_failure(&self) -> bool {
-        let n = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-        if n >= self.health_fail_threshold && self.is_healthy() {
-            self.healthy.store(false, Ordering::Relaxed);
-            return true;
-        }
-        false
+    fn lock_lifecycle(&self) -> std::sync::MutexGuard<'_, WorkerLifecycle> {
+        self.lifecycle.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Record a success (dispatch or health probe) — clears failures and
-    /// restores health.
-    pub fn record_success(&self) {
-        self.consecutive_failures.store(0, Ordering::Relaxed);
-        if !self.is_healthy() {
-            self.healthy.store(true, Ordering::Relaxed);
-        }
+    /// Feed one raw health observation into the worker's lifecycle.
+    /// Returns the transitions it caused (callers turn them into metrics).
+    pub fn observe(&self, obs: &HealthObservation) -> Vec<Transition> {
+        self.lock_lifecycle().observe(obs)
+    }
+
+    /// Record a failure on `dimension` with `reason` (escalation class is
+    /// the policy's business, not the caller's). Returns transitions.
+    pub fn record_failure(
+        &self,
+        dimension: inference_lab_worker_lifecycle::Dimension,
+        reason: FailureReason,
+    ) -> Vec<Transition> {
+        self.observe(&HealthObservation::failed(dimension, reason))
+    }
+
+    /// Transport evidence: the endpoint answered (dispatch connect or /health).
+    pub fn record_transport_success(&self) -> Vec<Transition> {
+        self.observe(&HealthObservation::up(inference_lab_worker_lifecycle::Dimension::Transport))
+    }
+
+    /// A real request completed with ≥1 generated token — the strongest
+    /// evidence (semantic ⇒ functional ⇒ transport).
+    pub fn request_served(&self) -> Vec<Transition> {
+        self.lock_lifecycle().request_served()
+    }
+
+    pub fn state(&self) -> WorkerState {
+        self.lock_lifecycle().state()
+    }
+
+    pub fn condition(&self) -> WorkerCondition {
+        self.lock_lifecycle().condition()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.lock_lifecycle().generation()
+    }
+
+    /// Total transitions ever emitted (history itself is bounded).
+    pub fn total_transitions(&self) -> u64 {
+        self.lock_lifecycle().total_transitions()
+    }
+
+    /// Stop assigning new work to this worker; in-flight requests finish.
+    pub fn drain(&self) -> Vec<Transition> {
+        self.lock_lifecycle().drain()
+    }
+
+    /// True when this worker receives new traffic (READY or DEGRADED).
+    /// Kept as the router-wide name for "route to me".
+    pub fn is_healthy(&self) -> bool {
+        self.lock_lifecycle().serves_traffic()
     }
 
     // -- prefixes ----------------------------------------------------------------
@@ -470,8 +519,12 @@ fn min_by<F: Fn(&Arc<WorkerHandle>) -> f64>(workers: &[Arc<WorkerHandle>], score
 mod tests {
     use super::*;
 
+    /// A worker that has passed transport + functional probes (READY).
     fn worker(id: &str) -> Arc<WorkerHandle> {
-        Arc::new(WorkerHandle::new(id, format!("http://{id}"), "m", "mock"))
+        let w = Arc::new(WorkerHandle::new(id, format!("http://{id}"), "m", "mock"));
+        w.record_transport_success();
+        w.request_served();
+        w
     }
 
     fn shape(prefix: u64, in_tok: u64, out_tok: u64) -> RequestShape {
@@ -562,19 +615,31 @@ mod tests {
 
     #[test]
     fn unhealthy_worker_gets_no_traffic_until_recovery() {
-        let a = worker("a");
+        // `a` is raw (STARTING): prove warming is required before traffic.
+        let a = Arc::new(WorkerHandle::new("a", "http://a", "m", "mock"));
         let b = worker("b");
         let r = Router::new(vec![a.clone(), b], RoutingPolicy::LeastEstimatedCompletionTime).unwrap();
-        assert!(!a.record_dispatch_failure());
-        assert!(!a.record_dispatch_failure());
-        assert!(a.record_dispatch_failure()); // 3rd flip
+        assert!(!a.is_healthy(), "a worker that never passed a probe gets no traffic");
+        a.record_transport_success();
+        a.request_served();
+        assert!(a.is_healthy());
+
+        // Three consecutive connect failures quarantine it (1 → degraded,
+        // 3 → unhealthy — the same escalation the gateway's probes drive).
+        a.record_failure(inference_lab_worker_lifecycle::Dimension::Transport, FailureReason::ConnectFailed);
+        assert!(a.is_healthy(), "one strike must not quarantine");
+        a.record_failure(inference_lab_worker_lifecycle::Dimension::Transport, FailureReason::ConnectFailed);
+        a.record_failure(inference_lab_worker_lifecycle::Dimension::Transport, FailureReason::ConnectFailed);
+        assert_eq!(a.state(), WorkerState::Unhealthy);
         match r.select(shape(1, 8, 8)) {
             SelectOutcome::Worker(w) => assert_eq!(w.id, "b"),
             SelectOutcome::AllUnhealthy => panic!(),
         }
-        a.record_success();
-        // Fresh prefix: neither worker has it cached, both idle → worker a
-        // (first in the list on an exact tie).
+        // Recovery is not one probe either: full ladder, then routable.
+        a.record_transport_success();
+        a.request_served();
+        a.request_served();
+        assert_eq!(a.state(), WorkerState::Ready);
         match r.select(shape(2, 8, 8)) {
             SelectOutcome::Worker(w) => assert_eq!(w.id, "a"),
             SelectOutcome::AllUnhealthy => panic!(),
@@ -584,7 +649,12 @@ mod tests {
     #[test]
     fn all_unhealthy_is_reported() {
         let a = worker("a");
-        a.healthy.store(false, Ordering::Relaxed);
+        for _ in 0..3 {
+            a.record_failure(
+                inference_lab_worker_lifecycle::Dimension::Transport,
+                FailureReason::ConnectFailed,
+            );
+        }
         let r = Router::new(vec![a], RoutingPolicy::LeastEstimatedCompletionTime).unwrap();
         assert!(matches!(r.select(shape(1, 8, 8)), SelectOutcome::AllUnhealthy));
     }

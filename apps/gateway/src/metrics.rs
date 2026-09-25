@@ -6,9 +6,11 @@
 //! accounting in tokens and estimated seconds, admission state, scheduler
 //! decisions, and the adaptive worker service model itself.
 
+use inference_lab_scheduler::WorkerHandle;
+use inference_lab_worker_lifecycle::WorkerState;
 use prometheus::{
-    Encoder, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
-    Registry, TextEncoder,
+    Encoder, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, Opts, Registry, TextEncoder,
 };
 
 /// Wide latency buckets: first token on a big prompt can legitimately take
@@ -104,6 +106,28 @@ pub struct Metrics {
     pub worker_decode_ms_per_tok: IntGaugeVec,
     pub worker_fixed_overhead_ms: IntGaugeVec,
     pub worker_remaining_work_seconds: IntGaugeVec,
+
+    // -- worker lifecycle (phase 4D) --------------------------------------------
+    /// 1 on the worker's current state, 0 on the rest: the state-timeline
+    /// panel's data source. `process alive ≠ serving traffic` is a *state*,
+    /// not a boolean.
+    pub worker_state: IntGaugeVec,
+    /// Every lifecycle edge, labeled by from/to/reason — the audit trail
+    /// that says HOW a worker got where it is.
+    pub worker_state_transitions_total: IntCounterVec,
+    /// Wall time of the tiny real-generation probe.
+    pub worker_functional_probe_seconds: HistogramVec,
+    /// Probe failures by reason (functional_probe_timeout = silent wedge).
+    pub worker_functional_probe_failures_total: IntCounterVec,
+    /// Completed restarts (generation epochs begun).
+    pub worker_restarts_total: IntCounterVec,
+    pub worker_consecutive_failures: IntGaugeVec,
+    /// Incarnation epoch; changes on every completed restart.
+    pub worker_generation: IntGaugeVec,
+    /// HTTP-200 responses that carried zero generated tokens — the
+    /// phase-4A proof that a clean HTTP answer can still be a failed
+    /// inference.
+    pub empty_completions_total: IntCounterVec,
 }
 
 impl Metrics {
@@ -126,6 +150,7 @@ impl Metrics {
             "upstream_error",
             "upstream_http_error",
             "first_token_timeout",
+            "stream_stalled",
             "no_worker",
             "rejected",
         ] {
@@ -295,6 +320,58 @@ impl Metrics {
             &["worker"],
         )?;
 
+        let worker_state = gauge_vec(
+            "inference_worker_state",
+            "Worker lifecycle state, 1 on the current state 0 elsewhere",
+            &["worker", "runtime", "state"],
+        )?;
+        let worker_state_transitions_total = IntCounterVec::new(
+            Opts::new(
+                "inference_worker_state_transitions_total",
+                "Lifecycle transitions by from/to/reason",
+            ),
+            &["from", "to", "reason"],
+        )?;
+        let worker_functional_probe_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "inference_worker_functional_probe_seconds",
+                "Wall time of the tiny real-generation readiness probe",
+            )
+            .buckets(vec![0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0]),
+            &["worker"],
+        )?;
+        let worker_functional_probe_failures_total = IntCounterVec::new(
+            Opts::new(
+                "inference_worker_functional_probe_failures_total",
+                "Functional-probe failures by reason",
+            ),
+            &["worker", "reason"],
+        )?;
+        let worker_restarts_total = IntCounterVec::new(
+            Opts::new(
+                "inference_worker_restarts_total",
+                "Completed restarts (new generation epochs begun)",
+            ),
+            &["worker", "reason"],
+        )?;
+        let worker_consecutive_failures = gauge_vec(
+            "inference_worker_consecutive_failures",
+            "Worst consecutive-failure streak across health dimensions",
+            &["worker"],
+        )?;
+        let worker_generation = gauge_vec(
+            "inference_worker_generation",
+            "Worker incarnation epoch; increments on every completed restart",
+            &["worker"],
+        )?;
+        let empty_completions_total = IntCounterVec::new(
+            Opts::new(
+                "inference_empty_completions_total",
+                "HTTP-200 completions that carried zero generated tokens",
+            ),
+            &["worker"],
+        )?;
+
         reg!(registry, requests_total);
         reg!(registry, requests_in_flight);
         reg!(registry, input_tokens_total);
@@ -327,6 +404,14 @@ impl Metrics {
         reg!(registry, worker_decode_ms_per_tok);
         reg!(registry, worker_fixed_overhead_ms);
         reg!(registry, worker_remaining_work_seconds);
+        reg!(registry, worker_state);
+        reg!(registry, worker_state_transitions_total);
+        reg!(registry, worker_functional_probe_seconds);
+        reg!(registry, worker_functional_probe_failures_total);
+        reg!(registry, worker_restarts_total);
+        reg!(registry, worker_consecutive_failures);
+        reg!(registry, worker_generation);
+        reg!(registry, empty_completions_total);
 
         Ok(Self {
             registry,
@@ -362,6 +447,14 @@ impl Metrics {
             worker_decode_ms_per_tok,
             worker_fixed_overhead_ms,
             worker_remaining_work_seconds,
+            worker_state,
+            worker_state_transitions_total,
+            worker_functional_probe_seconds,
+            worker_functional_probe_failures_total,
+            worker_restarts_total,
+            worker_consecutive_failures,
+            worker_generation,
+            empty_completions_total,
         })
     }
 
@@ -371,5 +464,47 @@ impl Metrics {
         let mut buf = Vec::new();
         encoder.encode(&self.registry.gather(), &mut buf)?;
         Ok(buf)
+    }
+
+    /// Feed lifecycle transitions into the metric surface: the edge audit
+    /// counter, restart accounting on epoch boundaries, and a warn log on
+    /// the edges an on-call cares about.
+    pub fn record_transitions(&self, worker: &WorkerHandle, transitions: &[inference_lab_worker_lifecycle::Transition]) {
+        for t in transitions {
+            self.worker_state_transitions_total
+                .with_label_values(&[
+                    t.from.as_str(),
+                    t.to.as_str(),
+                    t.reason.map(|r| r.as_str()).unwrap_or("none"),
+                ])
+                .inc();
+            if t.to == WorkerState::Unhealthy {
+                tracing::warn!(
+                    worker = %worker.id,
+                    reason = ?t.reason,
+                    "worker quarantined: UNHEALTHY, no new traffic"
+                );
+            }
+            // RECOVERING → WARMING means the restarted incarnation answered:
+            // the restart is complete, a new generation epoch begins.
+            if t.from == WorkerState::Recovering && t.to == WorkerState::Warming {
+                let reason = worker
+                    .condition()
+                    .reason
+                    .map(|r| r.as_str())
+                    .unwrap_or("unknown");
+                self.worker_restarts_total
+                    .with_label_values(&[worker.id.as_str(), reason])
+                    .inc();
+                self.worker_generation
+                    .with_label_values(&[worker.id.as_str()])
+                    .set(worker.generation() as i64);
+                tracing::info!(
+                    worker = %worker.id,
+                    generation = worker.generation(),
+                    "new worker generation warming up"
+                );
+            }
+        }
     }
 }

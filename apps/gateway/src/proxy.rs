@@ -21,6 +21,7 @@ use futures_util::{Stream, StreamExt};
 use inference_lab_protocol::{chunk_text, ChatCompletionChunk, Usage};
 use inference_lab_scheduler::WorkerHandle;
 use inference_lab_streaming::SseParser;
+use inference_lab_worker_lifecycle::{Dimension, FailureReason};
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry::KeyValue;
 use std::future::Future as _;
@@ -148,6 +149,9 @@ pub enum Outcome {
     UpstreamError,
     /// FIRST_TOKEN_TIMEOUT_S elapsed without a token.
     FirstTokenTimeout,
+    /// Stream produced tokens, then went silent past
+    /// STREAM_STALL_TIMEOUT_S (the 193 s mlx-lm stall class).
+    StreamStalled,
 }
 
 impl Outcome {
@@ -157,6 +161,7 @@ impl Outcome {
             Self::ClientCancelled => "client_cancelled",
             Self::UpstreamError => "upstream_error",
             Self::FirstTokenTimeout => "first_token_timeout",
+            Self::StreamStalled => "stream_stalled",
         }
     }
 }
@@ -178,6 +183,9 @@ pub struct StreamCtx {
     pub timeline: RequestTimeline,
     pub spans: TraceSpans,
     pub first_token_deadline: Option<Instant>,
+    /// Mid-stream stall watchdog: abort when no token arrives for this long
+    /// after generation started (0/off = None).
+    pub stream_stall_timeout: Option<Duration>,
     pub stream_mode: bool,
     /// (start, est_ms) pair registered with `worker.begin_work`.
     pub work_estimate: (Instant, f64),
@@ -209,6 +217,10 @@ pub struct InstrumentedStream<S> {
     /// upstream still wakes this stream's poll at the deadline (polling is
     /// otherwise driven purely by upstream data).
     watchdog: Option<Pin<Box<tokio::time::Sleep>>>,
+    /// Same trick, mid-stream: re-armed on every token, fires when the
+    /// upstream stops producing. The mlx-lm 193 s mid-stream stall is the
+    /// motivating signature.
+    stall_watchdog: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl<S> InstrumentedStream<S> {
@@ -226,6 +238,7 @@ impl<S> InstrumentedStream<S> {
             gap_max_s: 0.0,
             finished: false,
             watchdog,
+            stall_watchdog: None,
         }
     }
 
@@ -273,6 +286,7 @@ impl<S> InstrumentedStream<S> {
         let now = Instant::now();
         self.ctx.timeline.first_token_at = Some(now);
         self.watchdog = None; // token arrived: disarm
+        self.arm_stall_watchdog(now);
                               // Close the waiting-for-first-token span, open the streaming span.
         if let Some(cx) = self.ctx.spans.first_token.take() {
             cx.span().end();
@@ -309,7 +323,18 @@ impl<S> InstrumentedStream<S> {
             self.gap_max_s = self.gap_max_s.max(gap);
         }
         self.last_token_at = Some(now);
+        self.arm_stall_watchdog(now);
         self.ctx.timeline.output_tokens += 1;
+    }
+
+    /// (Re-)arm the mid-stream stall deadline from the given instant.
+    fn arm_stall_watchdog(&mut self, from: Instant) {
+        if let Some(timeout) = self.ctx.stream_stall_timeout {
+            self.stall_watchdog =
+                Some(Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(
+                    from + timeout,
+                ))));
+        }
     }
 
     /// Terminal bookkeeping — exactly once per request.
@@ -374,21 +399,54 @@ impl<S> InstrumentedStream<S> {
             }
         }
 
-        // Worker health: failures that implicate the worker, not the client.
+        // Worker lifecycle: failures that implicate the worker feed its
+        // state machine, classified by reason (escalation class differs —
+        // see inference-lab-worker-lifecycle). Client-side cancels are
+        // neutral: they say nothing about worker health.
         match outcome {
-            Outcome::Completed => w.record_success(),
-            Outcome::UpstreamError | Outcome::FirstTokenTimeout => {
-                let reason = if matches!(outcome, Outcome::UpstreamError) {
-                    "stream"
+            Outcome::Completed => {
+                if tl.output_tokens > 0 {
+                    let transitions = w.request_served();
+                    m.record_transitions(w, &transitions);
                 } else {
-                    "first_token_timeout"
+                    // The phase-4A signature: HTTP-clean, finish_reason
+                    // valid, zero generated tokens. A failed inference that
+                    // looks like a success must never count as one.
+                    m.empty_completions_total.with_label_values(&[w.id.as_str()]).inc();
+                    let transitions = w.record_failure(
+                        Dimension::Semantic,
+                        FailureReason::EmptyCompletion,
+                    );
+                    m.record_transitions(w, &transitions);
+                    tracing::warn!(
+                        worker = %w.id,
+                        "empty completion: HTTP 200 with zero generated tokens"
+                    );
+                }
+            }
+            Outcome::UpstreamError | Outcome::FirstTokenTimeout | Outcome::StreamStalled => {
+                let (dimension, reason, metric_kind) = match outcome {
+                    Outcome::UpstreamError => (
+                        Dimension::Transport,
+                        FailureReason::ConnectFailed,
+                        "stream",
+                    ),
+                    Outcome::FirstTokenTimeout => (
+                        Dimension::Functional,
+                        FailureReason::FirstTokenTimeout,
+                        "first_token_timeout",
+                    ),
+                    _ => (
+                        Dimension::Functional,
+                        FailureReason::StreamStalled,
+                        "stream_stalled",
+                    ),
                 };
                 m.worker_errors_total
-                    .with_label_values(&[w.id.as_str(), reason])
+                    .with_label_values(&[w.id.as_str(), metric_kind])
                     .inc();
-                if w.record_dispatch_failure() {
-                    tracing::warn!(worker = %w.id, "worker marked unhealthy after stream failure");
-                }
+                let transitions = w.record_failure(dimension, reason);
+                m.record_transitions(w, &transitions);
             }
             Outcome::ClientCancelled => {
                 m.stream_cancelled_total
@@ -407,9 +465,11 @@ impl<S> InstrumentedStream<S> {
             }
         }
 
-        // Worker bookkeeping.
+        // Worker bookkeeping. A draining worker's last completion ends the
+        // drain (DRAINING → STOPPED); those transitions hit metrics too.
         w.end_work(self.ctx.work_estimate.0, self.ctx.work_estimate.1);
-        w.dec_outstanding();
+        let drained = w.dec_outstanding();
+        m.record_transitions(w, &drained);
 
         // Spans: final attributes, then close in creation order.
         if let Some(root) = self.ctx.spans.root.as_ref() {
@@ -496,6 +556,26 @@ where
                 self.watchdog = None;
                 if !self.finished && self.ctx.timeline.first_token_at.is_none() {
                     self.finish(Outcome::FirstTokenTimeout);
+                    return Poll::Ready(None);
+                }
+            }
+        }
+
+        // Mid-stream stall watchdog: re-armed on every token, so firing
+        // means the upstream went silent for the full stall timeout after
+        // generation had already started.
+        if let Some(sleep) = self.stall_watchdog.as_mut() {
+            if matches!(sleep.as_mut().poll(cx), Poll::Ready(())) {
+                self.stall_watchdog = None;
+                if !self.finished && self.ctx.timeline.first_token_at.is_some() {
+                    tracing::warn!(
+                        worker = %self.ctx.worker.id,
+                        stall_s = self.gap_max_s.max(
+                            self.last_token_at.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0)
+                        ),
+                        "mid-stream stall: no token past STREAM_STALL_TIMEOUT_S"
+                    );
+                    self.finish(Outcome::StreamStalled);
                     return Poll::Ready(None);
                 }
             }
@@ -600,6 +680,7 @@ mod tests {
                 streaming: None,
             },
             first_token_deadline: None,
+            stream_stall_timeout: None,
             stream_mode: true,
             work_estimate: (Instant::now(), 100.0),
             est_total_ms: 100.0,
@@ -635,6 +716,55 @@ mod tests {
             .find(|f| f.name() == name)
             .map(|f| f.get_metric()[0].get_histogram().get_sample_count())
             .unwrap_or(0)
+    }
+
+    fn counter_for(
+        fams: &[prometheus::proto::MetricFamily],
+        name: &str,
+        label_name: &str,
+        label_value: &str,
+    ) -> f64 {
+        fams.iter()
+            .find(|f| f.name() == name)
+            .and_then(|f| {
+                f.get_metric().iter().find(|m| {
+                    m.get_label()
+                        .iter()
+                        .any(|l| l.name() == label_name && l.value() == label_value)
+                })
+            })
+            .map(|m| m.get_counter().value())
+            .unwrap_or(0.0)
+    }
+
+    /// One token, then eternal silence: the mid-stream stall signature.
+    fn one_token_then_silence(
+        tok: &str,
+    ) -> Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>> {
+        let tok = tok.to_string();
+        Box::pin(
+            futures_util::stream::iter(vec![Ok(Bytes::from(sse(&tok)))])
+                .chain(futures_util::stream::pending()),
+        )
+    }
+
+    #[tokio::test]
+    async fn mid_stream_stall_watchdog_trips_and_frees_capacity() {
+        let (metrics, mut ctx) = test_ctx();
+        ctx.stream_stall_timeout = Some(Duration::from_millis(50));
+        let mut st = InstrumentedStream::new(one_token_then_silence("x"), ctx);
+        let start = Instant::now();
+        while st.next().await.is_some() {}
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "stall watchdog must abort the silent stream, took {start:?}"
+        );
+        let fams = metrics.registry.gather();
+        assert_eq!(
+            counter_for(&fams, "inference_requests_total", "outcome", "stream_stalled"),
+            1.0,
+            "aborted stream must land on the stream_stalled outcome"
+        );
     }
 
     #[tokio::test]

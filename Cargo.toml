@@ -8,6 +8,7 @@ members = [
     "crates/streaming",
     "crates/metrics",
     "crates/workload",
+    "crates/worker-lifecycle",
 ]
 
 [workspace.package]
@@ -21,6 +22,7 @@ inference-lab-scheduler = { path = "crates/scheduler" }
 inference-lab-streaming = { path = "crates/streaming" }
 inference-lab-metrics = { path = "crates/metrics" }
 inference-lab-workload = { path = "crates/workload" }
+inference-lab-worker-lifecycle = { path = "crates/worker-lifecycle" }
 
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal", "sync", "net"] }
 serde = { version = "1", features = ["derive"] }

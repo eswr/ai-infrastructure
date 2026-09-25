@@ -6,3 +6,4 @@ license.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+inference-lab-worker-lifecycle = { workspace = true }

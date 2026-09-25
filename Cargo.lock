@@ -391,6 +391,7 @@ dependencies = [
  "inference-lab-protocol",
  "inference-lab-scheduler",
  "inference-lab-streaming",
+ "inference-lab-worker-lifecycle",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
@@ -694,10 +695,15 @@ name = "inference-lab-scheduler"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "inference-lab-worker-lifecycle",
 ]
 
 [[package]]
 name = "inference-lab-streaming"
+version = "0.1.0"
+
+[[package]]
+name = "inference-lab-worker-lifecycle"
 version = "0.1.0"
 
 [[package]]
