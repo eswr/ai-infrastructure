@@ -238,11 +238,11 @@ pub struct CandidateView {
     /// Estimated ms of work ahead on the candidate (queue + active
     /// prefill/decode remaining) at decision time.
     pub remaining_work_ms: f64,
-    /// `fixed + (prompt − reusable) × prefill_rate` — this request's
-    /// prefill on the candidate.
+    /// `fixed + (prompt − reusable) × prefill_rate × contention(bucket)`
+    /// for the load level the server carried at decision time.
     pub prefill_cost_ms: f64,
-    /// `decode_rate × output_tokens` — constant across candidates, kept
-    /// for the exported table.
+    /// `decode_rate(concurrency bucket) × output_tokens` — the decode
+    /// load this request would JOIN, not the solo rate.
     pub decode_cost_ms: f64,
     /// The load-gated headline: `remaining_work + prefill_cost`.
     pub estimated_ttft_ms: f64,
@@ -250,6 +250,11 @@ pub struct CandidateView {
     pub estimated_service_ms: f64,
     /// `reusable × prefill_rate` — what the cache saves vs a cold slot.
     pub cache_savings_ms: f64,
+    /// Concurrency buckets the pricing used: prefill counts active
+    /// prefills + this request; decode counts active decodes + prefills
+    /// + this request (everything prefilling now will be decoding then).
+    pub prefill_bucket: &'static str,
+    pub decode_bucket: &'static str,
 }
 
 /// Why a routing decision landed where it landed.
@@ -922,15 +927,15 @@ impl Router {
 
         // Client pin: an explicit id_slot is honored when the router
         // models slots (external cache warmers teach the model this way).
-        if let Some(pin) = req.pinned_slot {
-            if let Some(w) = candidates.iter().find(|w| w.slot == Some(pin)) {
-                // Price from the pre-dispatch state, then reserve — the
-                // exported table must show what the DECISION saw.
-                let view = self.single_view(w, &req);
-                let est_prefill = w.prefill_cost_ms(req.input_tokens, view.reusable_tokens);
-                let est_total =
-                    est_prefill + w.decode_ms_per_tok() * req.output_tokens as f64;
-                let ticket = w.begin_work(est_total, est_prefill);
+            if let Some(pin) = req.pinned_slot {
+                if let Some(w) = candidates.iter().find(|w| w.slot == Some(pin)) {
+                    // Price from the pre-dispatch state, then reserve — the
+                    // exported table must show what the DECISION saw, and
+                    // the reservation must be exactly what was priced.
+                    let view = self.single_view(w, &req);
+                    let est_prefill = view.prefill_cost_ms;
+                    let est_total = view.prefill_cost_ms + view.decode_cost_ms;
+                    let ticket = w.begin_work(est_total, est_prefill);
                 w.inc_outstanding();
                 w.note_slot_dispatch(req.prefix_hash, req.input_tokens);
                 w.remember_prefix(req.prefix_hash);
@@ -1004,12 +1009,11 @@ impl Router {
                 )
             }
             true => {
+                // Reserve exactly what the chosen view priced (bucketed
+                // prefill + bucketed decode) — later arrivals price this
+                // dispatch into their remaining-work at the same load.
                 let view = &views[chosen];
-                let est_prefill =
-                    winner.prefill_cost_ms(req.input_tokens, view.reusable_tokens);
-                let est_total =
-                    est_prefill + winner.decode_ms_per_tok() * req.output_tokens as f64;
-                (est_total, est_prefill)
+                (view.prefill_cost_ms + view.decode_cost_ms, view.prefill_cost_ms)
             }
         };
         let work_start = winner.begin_work(est_total, est_prefill);
@@ -1037,24 +1041,36 @@ impl Router {
     /// cache-aware ECT); `cache_savings_ms` always reports the *raw*
     /// savings so a floor-refused hit can still be attributed as
     /// `insufficient_benefit` in telemetry.
+    ///
+    /// Pricing goes through the candidate's shared server calibration at
+    /// the concurrency it would JOIN: prefill contends with every active
+    /// prefill + itself; decode contends with active decodes AND active
+    /// prefills (they finish prefill before this request does). This is
+    /// the concurrency-bucketed cost model — the 4B.2 model's seeded
+    /// 25 ms/tok decode under-priced loaded decode 10–13× and closed the
+    /// load gate too late.
     fn views(&self, candidates: &[Arc<WorkerHandle>], req: &RequestShape) -> Vec<CandidateView> {
         candidates
             .iter()
             .map(|w| {
                 let cache = w.slot_cache_view(req.prefix_hash, req.input_tokens);
-                let rate = w.prefill_ms_per_tok();
                 let raw_reusable = cache.reusable_tokens;
                 let reusable = match self.policy {
                     RoutingPolicy::SlotCacheAwareEct
                         if self.config.min_cache_savings_ms > 0.0
-                            && raw_reusable as f64 * rate < self.config.min_cache_savings_ms =>
+                            && raw_reusable as f64 * w.prefill_ms_per_tok()
+                                < self.config.min_cache_savings_ms =>
                     {
                         0
                     }
                     _ => raw_reusable,
                 };
-                let decode = w.decode_ms_per_tok() * req.output_tokens as f64;
-                let prefill = w.prefill_cost_ms(req.input_tokens, reusable);
+                let cal = w.calibration();
+                let active_prefills = cal.active_prefills();
+                let active_decodes = cal.active_decodes();
+                let decode_load = active_decodes + active_prefills + 1;
+                let prefill = cal.prefill_ms(req.input_tokens, reusable, active_prefills + 1);
+                let decode = cal.decode_rate_for(decode_load) * req.output_tokens as f64;
                 let remaining = w.remaining_work_ms();
                 CandidateView {
                     worker_id: w.id.clone(),
@@ -1066,7 +1082,9 @@ impl Router {
                     decode_cost_ms: decode,
                     estimated_ttft_ms: remaining + prefill,
                     estimated_service_ms: prefill + decode,
-                    cache_savings_ms: raw_reusable as f64 * rate,
+                    cache_savings_ms: raw_reusable as f64 * w.prefill_ms_per_tok(),
+                    prefill_bucket: bucket_label(active_prefills + 1),
+                    decode_bucket: bucket_label(decode_load),
                 }
             })
             .collect()
@@ -1428,6 +1446,27 @@ mod tests {
         Router::new(bank, policy).unwrap()
     }
 
+    /// Slot bank whose handles SHARE one calibration — the topology a real
+    /// llama.cpp slot bank has (one server, one model).
+    fn slots_shared_cal(n: usize, policy: RoutingPolicy, cal: Arc<RuntimeCalibration>) -> Router {
+        let bank: Vec<_> = (0..n)
+            .map(|i| {
+                let mut h = WorkerHandle::with_calibration(
+                    format!("s{i}"),
+                    format!("http://s{i}"),
+                    "m",
+                    "llama",
+                    cal.clone(),
+                );
+                h.slot = Some(i as u32);
+                h.record_transport_success();
+                h.request_served();
+                Arc::new(h)
+            })
+            .collect();
+        Router::new(bank, policy).unwrap()
+    }
+
     #[test]
     fn least_work_reservations_spread_a_burst_across_slots() {
         let r = slots_with(8, RoutingPolicy::SlotLeastWork);
@@ -1532,6 +1571,36 @@ mod tests {
         assert_eq!(bypass.reason, "queue_pressure");
         assert_eq!(bypass.slot, Some(0));
         assert!(bypass.forgone_savings_ms > 50_000.0);
+    }
+
+    #[test]
+    fn loaded_decode_buckets_close_the_load_gate_earlier() {
+        // The 4B.2 failure in miniature. Bucket-1 decode is measured at
+        // ~100 ms/tok (20 EWMA steps toward a 100 ms/tok observation under
+        // 2 streams), so queueing behind a busy warm slot is priced at the
+        // LOADED rate and the gate closes at 3 joins — the seeded
+        // one-rate model (25 ms/tok everywhere) only closed at 8.
+        let cal = Arc::new(RuntimeCalibration::from_seeds(
+            "apple-m5", "llama-cpp", "m", 8, llama_defaults(),
+        ));
+        let peer = cal.register_dispatch(600_000.0, 1.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let t = cal.register_dispatch(600_000.0, 1.0);
+        for _ in 0..20 {
+            cal.observe_decode(64, 6400.0, &t); // 100 ms/tok
+        }
+        cal.unregister_dispatch(&t);
+        cal.unregister_dispatch(&peer);
+
+        let r = slots_shared_cal(8, RoutingPolicy::SlotCacheAwareEct, cal);
+        r.workers()[0].note_slot_completion(7, 11_400, 11_400);
+        for _ in 0..3 {
+            let d = decided(r.select_reserved(shape(7, 8400, 256)));
+            assert_eq!(d.worker.slot, Some(0), "warm slot keeps winning while the loaded queue is cheap");
+        }
+        let d = decided(r.select_reserved(shape(7, 8400, 256)));
+        assert_eq!(d.worker.slot, Some(1), "loaded decode pricing must close the gate sooner than seeds");
+        assert_eq!(d.reason, DecisionReason::LoadOverrodeAffinity);
     }
 
     #[test]

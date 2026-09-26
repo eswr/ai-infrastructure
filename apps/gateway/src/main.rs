@@ -865,6 +865,40 @@ async fn gauge_sampler(st: Arc<AppState>) {
         m.queued_output_tokens.set(s.queued_output_tokens as i64);
         m.estimated_queue_seconds.set(s.estimated_queue_seconds);
         m.load_state.set(s.load_state as i64);
+        // Cost-model gauges: server-wide phase counts (deduped across the
+        // slot handles that share one server calibration) and the
+        // calibrated bucket parameters themselves.
+        let mut seen_cals: Vec<Arc<RuntimeCalibration>> = Vec::new();
+        for w in st.router.workers() {
+            let cal = w.calibration();
+            if !seen_cals.iter().any(|s| Arc::ptr_eq(s, &cal)) {
+                seen_cals.push(cal);
+            }
+        }
+        let active_prefills: usize = seen_cals.iter().map(|c| c.active_prefills()).sum();
+        let active_decodes: usize = seen_cals.iter().map(|c| c.active_decodes()).sum();
+        m.inference_active_prefills.set(active_prefills as i64);
+        m.inference_active_decodes.set(active_decodes as i64);
+        for cal in &seen_cals {
+            let p = cal.snapshot_profile();
+            for (i, b) in inference_lab_scheduler::BUCKET_LABELS.iter().enumerate() {
+                m.scheduler_decode_ms_per_token
+                    .with_label_values(&[b])
+                    .set(p.decode.ms_per_token[i]);
+                m.scheduler_prefill_contention_multiplier
+                    .with_label_values(&[b])
+                    .set(p.prefill.contention_multiplier[i]);
+                m.scheduler_calibration_samples
+                    .with_label_values(&["decode", b])
+                    .set(p.decode.samples[i] as i64);
+                m.scheduler_calibration_samples
+                    .with_label_values(&["prefill_contention", b])
+                    .set(p.prefill.contention_samples[i] as i64);
+            }
+            m.scheduler_calibration_samples
+                .with_label_values(&["prefill_regression", "solo"])
+                .set(p.prefill.samples as i64);
+        }
         for w in st.router.workers() {
             let id = w.id.as_str();
             let cond = w.condition();

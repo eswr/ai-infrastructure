@@ -107,6 +107,22 @@ pub struct Metrics {
     pub worker_fixed_overhead_ms: IntGaugeVec,
     pub worker_remaining_work_seconds: IntGaugeVec,
 
+    // -- cost model (phase 4B.3: concurrency-bucketed calibration) -----------
+    /// Server-wide dispatches currently (estimated to be) prefilling.
+    /// Kept SEPARATE from `inference_requests_active`: 8 requests in
+    /// prefill and 8 requests decoding have radically different
+    /// consequences on this machine (and on CUDA later).
+    pub inference_active_prefills: IntGauge,
+    /// Server-wide dispatches currently in their decode phase.
+    pub inference_active_decodes: IntGauge,
+    /// Calibrated decode ms/token per active-stream bucket ("1","2","3-4","5-8").
+    pub scheduler_decode_ms_per_token: prometheus::GaugeVec,
+    /// Calibrated prefill contention multiplier per active-prefill bucket.
+    pub scheduler_prefill_contention_multiplier: prometheus::GaugeVec,
+    /// Observation counts behind the calibration: kind = decode |
+    /// prefill_contention | prefill_regression, bucket = "1".."5-8"|"solo".
+    pub scheduler_calibration_samples: IntGaugeVec,
+
     // -- routing decisions (phase 4B.2: slots as schedulable cache domains) ----
     /// Requests where reusable cache was available on some slot. The
     /// denominator of "locality was available for X% of requests".
@@ -352,6 +368,44 @@ impl Metrics {
             "Estimated remaining work of active dispatches",
             &["worker"],
         )?;
+        let inference_active_prefills = IntGauge::new(
+            "inference_active_prefills",
+            "Server-wide dispatches currently prefilling (prefill is the anti-scaling phase)",
+        )?;
+        let inference_active_decodes = IntGauge::new(
+            "inference_active_decodes",
+            "Server-wide dispatches currently decoding (loaded decode costs ~10x solo)",
+        )?;
+        let scheduler_decode_ms_per_token = prometheus::GaugeVec::new(
+            Opts::new(
+                "scheduler_decode_ms_per_token",
+                "Calibrated decode cost by active-decode-stream concurrency bucket",
+            ),
+            &["bucket"],
+        )?;
+        let scheduler_prefill_contention_multiplier = prometheus::GaugeVec::new(
+            Opts::new(
+                "scheduler_prefill_contention_multiplier",
+                "Calibrated prefill slowdown multiplier by active-prefill bucket",
+            ),
+            &["bucket"],
+        )?;
+        let scheduler_calibration_samples = IntGaugeVec::new(
+            Opts::new(
+                "scheduler_calibration_samples",
+                "Observations behind each calibration parameter",
+            ),
+            &["kind", "bucket"],
+        )?;
+        // Pre-register bucket series so they exist before the first
+        // observation lands (and in seed-only deployments).
+        for b in inference_lab_scheduler::BUCKET_LABELS {
+            scheduler_decode_ms_per_token.with_label_values(&[b]).set(0.0);
+            scheduler_prefill_contention_multiplier.with_label_values(&[b]).set(1.0);
+            scheduler_calibration_samples.with_label_values(&["decode", b]);
+            scheduler_calibration_samples.with_label_values(&["prefill_contention", b]);
+        }
+        scheduler_calibration_samples.with_label_values(&["prefill_regression", "solo"]);
 
         let worker_state = gauge_vec(
             "inference_worker_state",
@@ -500,6 +554,11 @@ impl Metrics {
         reg!(registry, worker_decode_ms_per_tok);
         reg!(registry, worker_fixed_overhead_ms);
         reg!(registry, worker_remaining_work_seconds);
+        reg!(registry, inference_active_prefills);
+        reg!(registry, inference_active_decodes);
+        reg!(registry, scheduler_decode_ms_per_token);
+        reg!(registry, scheduler_prefill_contention_multiplier);
+        reg!(registry, scheduler_calibration_samples);
         reg!(registry, worker_state);
         reg!(registry, worker_state_transitions_total);
         reg!(registry, worker_functional_probe_seconds);
@@ -553,6 +612,11 @@ impl Metrics {
             worker_decode_ms_per_tok,
             worker_fixed_overhead_ms,
             worker_remaining_work_seconds,
+            inference_active_prefills,
+            inference_active_decodes,
+            scheduler_decode_ms_per_token,
+            scheduler_prefill_contention_multiplier,
+            scheduler_calibration_samples,
             worker_state,
             worker_state_transitions_total,
             worker_functional_probe_seconds,
