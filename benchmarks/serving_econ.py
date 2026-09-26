@@ -185,10 +185,10 @@ def curve_table(study: Path, wave: dict, md: list[str]) -> None:
 def matrix_table(study: Path, legs: list[dict], md: list[str]) -> None:
     if not legs:
         return
-    md += ["## The 16-cell matrix (cache x admission x contention gate)", "",
-           "| Cell | Verdict | OK | TTFT p50 | TTFT p95 | ITL p50 | Out tok/s "
+    md += ["## The serving-interaction matrix (cache x admission x contention gate)", "",
+           "| Cell | Verdict | Term | OK | TTFT p50 | TTFT p95 | ITL p50 | Out tok/s "
            "| Reused tok/req | Gate holds | Spills |",
-           "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+           "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for leg in legs:
         leg_dir = study / leg["leg"]
         s = leg_summary(leg_dir)
@@ -200,8 +200,10 @@ def matrix_table(study: Path, legs: list[dict], md: list[str]) -> None:
         n_obs = s.get("cache_observed_requests")
         reused = (s.get("reused_tokens_total") / n_obs
                   if s.get("reused_tokens_total") is not None and n_obs else None)
+        term = ("-" if not leg.get("terminated_early")
+                else leg.get("termination_reason") or "early")
         md.append(
-            f"| {leg['leg']} | {leg.get('verdict')} "
+            f"| {leg['leg']} | {leg.get('verdict')} | {term} "
             f"| {s.get('successful', '?')}/{s.get('total_requests', '?')} "
             f"| {ms(s.get('ttft_ms', {}).get('p50'))} "
             f"| {ms(s.get('ttft_ms', {}).get('p95'))} "

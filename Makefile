@@ -88,8 +88,11 @@ experiment-calibration: build-release ## phase-4B.3: calibrated cost model vs 4B
 experiment-calibration-ab: build-release ## phase-4B.3 A/B: --no-calibration rerun for the same legs (seed-only baseline)
 	python3 benchmarks/prefix_router.py --runtime llama-cpp --policies cache_aware_ect,least_work --topologies all-cold,one-warm,four-warm,all-warm --no-calibration --study-name calibration-router-nocal
 
-experiment-serving-interactions: build-release ## phase-4C: contention wave + 16-cell matrix + mixed interactive workload (~3 h, real GPU)
-	python3 benchmarks/serving_interactions.py --runtime llama-cpp --contention-wave --matrix --mixed
+experiment-serving-interactions: build-release ## phase-4C integration test: 4 cells (8K cold/warm x baseline/full, out=64) + mixed A/B (~40 min, real GPU)
+	python3 benchmarks/serving_interactions.py --runtime llama-cpp --matrix-fast --mixed
+
+experiment-serving-interactions-full: build-release ## phase-4C exhaustive 16-cell ablation (hours; run deliberately)
+	python3 benchmarks/serving_interactions.py --runtime llama-cpp --matrix-full --mixed
 
 # -------------------------------------------------------- observability --
 

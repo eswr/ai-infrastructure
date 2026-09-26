@@ -128,6 +128,68 @@ def run_loadgen(loadgen_bin: Path, toml_path: Path, out_dir: Path,
     return {"exit": rc.returncode}
 
 
+def run_loadgen_monitored(loadgen_bin: Path, toml_path: Path, out_dir: Path,
+                          log_path: Path | None = None, *,
+                          budget_s: float = 900.0, stall_s: float = 90.0) -> dict:
+    """Run one measured leg with EARLY TERMINATION (phase 4C): a collapsed
+    leg is better evidence recorded than another 20 minutes burned.
+
+    Aborts the loadgen when any of these fire:
+      * worker_unhealthy — the gateway quarantined a worker (lifecycle);
+      * no_progress     — no new completed request for `stall_s` while work
+                          is in flight. Armed only after the leg's FIRST
+                          completion: a cold c8 anti-scaling crawl
+                          legitimately completes nothing for minutes;
+      * time_budget     — the leg exceeded `budget_s` (the collapse backstop).
+    Terminating the loadgen disconnects its clients, which cancels upstream
+    generation and releases the workers."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with (log_path or (out_dir / "run.log")).open("wb") as fh:
+        proc = subprocess.Popen(
+            [str(loadgen_bin), "--matrix", str(toml_path), "--out-dir", str(out_dir)],
+            cwd=REPO, stdout=fh, stderr=subprocess.STDOUT, text=True)
+        t0 = time.time()
+        last_ok = 0.0
+        last_progress = time.time()
+        termination = None
+        while proc.poll() is None:
+            time.sleep(5)
+            status, body = http_get("http://127.0.0.1:8080/status", timeout_s=2.0)
+            if status == 200:
+                try:
+                    if any(not w["healthy"] for w in json.loads(body)["workers"]):
+                        termination = "worker_unhealthy"
+                        break
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    pass
+            mstatus, mbody = http_get("http://127.0.0.1:8080/metrics", timeout_s=2.0)
+            if mstatus == 200:
+                prom = parse_prom_text(mbody)
+                ok = sum(v for (n, l), v in prom.items()
+                         if n == "inference_requests_total" and 'outcome="ok"' in l)
+                in_flight = sum(v for (n, _l), v in prom.items()
+                                if n == "inference_requests_in_flight")
+                if ok > last_ok:
+                    last_ok = ok
+                    last_progress = time.time()
+                elif in_flight > 0 and time.time() - last_progress > stall_s:
+                    termination = "no_progress"
+                    break
+            if time.time() - t0 > budget_s:
+                termination = "time_budget"
+                break
+        if termination and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+    return {"exit": proc.returncode if not termination else 0,
+            "raw_exit": proc.returncode,
+            "terminated_early": termination is not None,
+            "termination_reason": termination}
+
+
 def write_matrix(path: Path, study: str, description: str, model: str, *,
                  input_tokens: int, shared: int, out_tokens: int,
                  concurrency: int, num_requests: int, seed: int) -> None:
@@ -513,10 +575,20 @@ def warm_slots(loadgen_bin: Path, leg_dir: Path, model: str, size: int, n: int =
     return {"requested": n, "ok": ok, "wall_s": wall, "results": results}
 
 
+def seed_cal_dir(src: Path, dst: Path) -> None:
+    """Give a leg its own copy of the calibrated profile: every leg (and
+    both sides of an A/B) starts from the SAME measured machine truth and
+    evolves independently - no cross-leg calibration drift."""
+    if src and src.exists():
+        import shutil
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+
+
 def matrix_leg(gateway_bin: Path, loadgen_bin: Path, study_dir: Path,
                model: str, rt, sampler: MemorySampler, cal_dir: str,
                size_name: str, cache: str, admission: bool, gate: bool,
-               out_tokens: int, n: int, c: int, smoke: bool) -> dict:
+               out_tokens: int, n: int, c: int, smoke: bool,
+               budget_s: float = 900.0) -> dict:
     """One cell of the 4C matrix: size x cache x admission x gate.
     Cache state is rebuilt honestly per leg (process restart = cold; the
     restart IS the only cache reset llama.cpp 0.4.1 offers)."""
@@ -563,8 +635,10 @@ def matrix_leg(gateway_bin: Path, loadgen_bin: Path, study_dir: Path,
                          out_tokens=out_tokens, concurrency=c,
                          num_requests=n, seed=WARM_SEED)
             t0 = time.time()
-            rec = run_loadgen(loadgen_bin, leg_dir / "leg.toml", leg_dir,
-                              leg_dir / "run.log")
+            rec = run_loadgen_monitored(loadgen_bin, leg_dir / "leg.toml",
+                                        leg_dir, leg_dir / "run.log",
+                                        budget_s=budget_s)
+            record.update(rec)
             record["run_exit"] = rec["exit"]
             record["run_wall_s"] = round(time.time() - t0, 1)
 
@@ -577,7 +651,10 @@ def matrix_leg(gateway_bin: Path, loadgen_bin: Path, study_dir: Path,
             post = rt.functional_probe(phase=f"post_{leg}")
             record["post_run_probe"] = {"ok": post.ok, "tokens": post.tokens,
                                         "error": post.error}
-            record["verdict"] = ("healthy"
+            collapsed = (record.get("terminated_early")
+                         and record.get("termination_reason") != "worker_unhealthy")
+            record["verdict"] = ("collapsed" if collapsed
+                                 else "healthy"
                                  if post.ok and record["run_exit"] == 0
                                  else "degraded")
         finally:
@@ -585,27 +662,54 @@ def matrix_leg(gateway_bin: Path, loadgen_bin: Path, study_dir: Path,
     return record
 
 
+# The integration-test cells (phase 4C revised scope): does the full stack
+# (calibrated contention gate + admission) help when prefill is expensive
+# (cold), and does it avoid hurting when cache reuse makes prefill cheap
+# (warm)? Baseline = both off; full = both on. out=64: the question is
+# TTFT / contention / queueing, not decode volume.
+FAST_CELLS = [("long", "cold", False, False), ("long", "cold", True, True),
+              ("long", "warm", False, False), ("long", "warm", True, True)]
+
+
 def cache_matrix(gateway_bin: Path, loadgen_bin: Path, study_dir: Path,
                  model: str, rt, sampler: MemorySampler, cal_dir: str,
-                 smoke: bool) -> list[dict]:
-    """2 sizes x 2 cache states x 2 admission x 2 contention policies = 16."""
-    out_tokens = 32 if smoke else OUTPUT_TOKENS
+                 smoke: bool, full: bool, seed_cal: Path | None,
+                 budget_s: float) -> list[dict]:
+    """full=True: the exhaustive 2x2x2x2 = 16-cell ablation (out=256).
+    full=False (the default integration test): FAST_CELLS with out=64.
+    Each leg gets its own calibration copy seeded from `seed_cal` so the
+    A/B sides start from identical machine knowledge."""
+    out_tokens = 32 if smoke else (OUTPUT_TOKENS if full else 64)
     n = c = 4 if smoke else 8
-    sizes = ["short"] if smoke else list(SIZES)
-    cells = [(s, cache, adm, gate)
-             for s in sizes
-             for cache in ("cold", "warm")
-             for adm in (False, True)
-             for gate in (False, True)]
+    if full:
+        cells = [(s, cache, adm, gate)
+                 for s in (["short"] if smoke else list(SIZES))
+                 for cache in ("cold", "warm")
+                 for adm in (False, True)
+                 for gate in (False, True)]
+    else:
+        cells = ([(s, cache, adm, gate)
+                  for (s, cache, adm, gate) in FAST_CELLS]
+                 if not smoke else
+                 [("short", "cold", False, False), ("short", "cold", True, True)])
     legs = []
     for (size_name, cache, adm, gate) in cells:
-        log(f"=== cell {size_name}-{cache}-admit{int(adm)}-gate{int(gate)}")
+        leg = f"{size_name}-{cache}-admit{int(adm)}-gate{int(gate)}"
+        log(f"=== cell {leg}")
+        # Per-leg calibration: a fresh copy of the seeded profile per leg
+        # when seeding is on; otherwise the shared study dir (legacy).
+        leg_cal = cal_dir
+        if seed_cal:
+            leg_cal = str(study_dir / leg / "calibration")
+            seed_cal_dir(seed_cal, Path(leg_cal))
         rec = matrix_leg(gateway_bin, loadgen_bin, study_dir, model, rt,
-                         sampler, cal_dir, size_name, cache, adm, gate,
-                         out_tokens, n, c, smoke)
+                         sampler, leg_cal, size_name, cache, adm, gate,
+                         out_tokens, n, c, smoke, budget_s=budget_s)
         legs.append(rec)
         log(f"=== cell {rec['leg']}: {rec.get('verdict')} "
-            f"(exit={rec.get('run_exit')}, wall={rec.get('run_wall_s')}s)")
+            f"(exit={rec.get('run_exit')}, wall={rec.get('run_wall_s')}s"
+            + (f", early={rec.get('termination_reason')}"
+               if rec.get("terminated_early") else "") + ")")
     return legs
 
 
@@ -628,17 +732,24 @@ def mixed_arrival(loadgen_bin: Path, phase_dir: Path, model: str, tag: str,
 
 
 def mixed_workload(gateway_bin: Path, loadgen_bin: Path, study_dir: Path,
-                   model: str, rt, sampler: MemorySampler, cal_dir: str) -> dict:
+                   model: str, rt, sampler: MemorySampler, cal_dir: str,
+                   seed_cal: Path | None = None, budget_s: float = 900.0) -> dict:
     """The 4C centerpiece: 2x8K warm-prefix + 2x8K cold + 4x1K interactive,
     all arriving over one short burst, run twice - baseline (admission off,
     gate off) vs full stack (admission on, contention gate on). Warm-cache
-    state before each config, classes on the wire, interactive SLO 5 s."""
+    state before each config, classes on the wire, interactive SLO 5 s.
+    Each config gets its own calibration copy (same seed) so the A/B is
+    not confounded by cross-config calibration drift."""
     record: dict = {"leg": "mixed", "slo_interactive_ttft_s": MIXED_SLO_INTERACTIVE_TTFT_S}
     record["configs"] = []
     for config, admission, gate in (("baseline", False, False), ("full", True, True)):
         cfg_dir = study_dir / f"mixed-{config}"
         cfg_dir.mkdir(parents=True, exist_ok=True)
         cfg: dict = {"config": config, "admission": admission, "gate": gate}
+        leg_cal = cal_dir
+        if seed_cal:
+            leg_cal = str(cfg_dir / "calibration")
+            seed_cal_dir(seed_cal, Path(leg_cal))
 
         if not rt.reset_cache():
             cfg["verdict"] = "restart_failed"
@@ -652,7 +763,7 @@ def mixed_workload(gateway_bin: Path, loadgen_bin: Path, study_dir: Path,
         with (cfg_dir / "gateway.log").open("wb") as gw_log:
             gw = subprocess.Popen(
                 [str(gateway_bin)], stdout=gw_log, stderr=subprocess.STDOUT,
-                env={**os.environ, **gateway_env(model, rt.port, cal_dir,
+                env={**os.environ, **gateway_env(model, rt.port, leg_cal,
                                                  admission=admission, gate=gate)},
                 cwd=REPO, start_new_session=True)
             try:
@@ -727,10 +838,21 @@ def main() -> int:
     ap.add_argument("--contention-wave", action="store_true",
                     help="run the controlled contention wave "
                          "(prefill levels, decode scaling, decode interference)")
-    ap.add_argument("--matrix", action="store_true",
-                    help="run the 16-cell cache x admission x contention matrix")
+    ap.add_argument("--matrix-fast", action="store_true", dest="matrix_fast",
+                    help="the 4-cell integration test: {cold,warm} x "
+                         "{baseline, full stack} on 8K prompts, out=64")
+    ap.add_argument("--matrix-full", action="store_true", dest="matrix_full",
+                    help="the exhaustive 16-cell ablation (publication-grade; "
+                         "NOT the default - it runs for hours)")
     ap.add_argument("--mixed", action="store_true",
                     help="run the mixed interactive workload (baseline vs full stack)")
+    ap.add_argument("--seed-cal", type=Path, default=None, dest="seed_cal",
+                    help="calibration DIR to copy per leg (e.g. a prior "
+                         "study's wave-taught profile): every leg and both "
+                         "A/B sides start from the same machine truth")
+    ap.add_argument("--leg-budget-s", type=float, default=900.0,
+                    help="early-termination wall budget per measured leg "
+                         "(default 900)")
     ap.add_argument("--rounds", type=int, default=2,
                     help="rounds per contention level (default 2)")
     ap.add_argument("--smoke", action="store_true",
@@ -738,8 +860,9 @@ def main() -> int:
                          "validate the pipeline; not comparable data")
     args = ap.parse_args()
 
-    if not (args.contention_wave or args.matrix or args.mixed):
-        log("nothing to do: pass --contention-wave, --matrix and/or --mixed")
+    if not (args.contention_wave or args.matrix_fast or args.matrix_full or args.mixed):
+        log("nothing to do: pass --contention-wave, --matrix-fast, "
+            "--matrix-full and/or --mixed")
         return 2
     if not args.gateway.exists():
         sys.exit("gateway binary missing — cargo build --release -p gateway")
@@ -774,18 +897,24 @@ def main() -> int:
             log(f"=== contention wave: {wave.get('verdict')} "
                 f"(saturation level={wave.get('prefill_saturation_level')}, "
                 f"wall={wave.get('wall_s')}s)")
-        if args.matrix:
-            log("=== 16-cell serving-interaction matrix")
+        if args.matrix_fast or args.matrix_full:
+            log("=== serving-interaction matrix (%s)"
+                % ("16-cell full" if args.matrix_full else "fast integration test"))
             record["matrix"] = cache_matrix(args.gateway, loadgen_bin, study_dir,
                                             rt.model, rt, sampler, cal_dir,
-                                            smoke=args.smoke)
-            healthy = sum(1 for leg in record["matrix"]
-                          if leg.get("verdict") == "healthy")
-            log(f"=== matrix: {healthy}/{len(record['matrix'])} legs healthy")
+                                            smoke=args.smoke,
+                                            full=args.matrix_full,
+                                            seed_cal=args.seed_cal,
+                                            budget_s=args.leg_budget_s)
+            good = sum(1 for leg in record["matrix"]
+                       if leg.get("verdict") in ("healthy", "collapsed"))
+            log(f"=== matrix: {good}/{len(record['matrix'])} legs finished")
         if args.mixed:
             log("=== mixed interactive workload (baseline vs full stack)")
             record["mixed"] = mixed_workload(args.gateway, loadgen_bin, study_dir,
-                                             rt.model, rt, sampler, cal_dir)
+                                             rt.model, rt, sampler, cal_dir,
+                                             seed_cal=args.seed_cal,
+                                             budget_s=args.leg_budget_s)
     finally:
         rt.stop()
         sampler.stop()
