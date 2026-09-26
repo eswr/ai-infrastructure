@@ -39,7 +39,7 @@ use crate::{clamp, ServiceDefaults};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Bump when the profile layout changes incompatibly. v2 (phase 4C):
@@ -382,6 +382,10 @@ pub struct RuntimeCalibration {
     inner: Mutex<CalibInner>,
     dirty: AtomicBool,
     loaded_from_store: bool,
+    /// Wake signal for the phase-4C contention gate: fired whenever a
+    /// dispatch leaves the registry, so a held arrival re-prices against
+    /// the smaller load instead of polling.
+    gate_notify: Arc<tokio::sync::Notify>,
 }
 
 impl RuntimeCalibration {
@@ -412,6 +416,7 @@ impl RuntimeCalibration {
             inner: Mutex::new(inner),
             dirty: AtomicBool::new(false),
             loaded_from_store: false,
+            gate_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -459,11 +464,18 @@ impl RuntimeCalibration {
             inner: Mutex::new(inner),
             dirty: AtomicBool::new(false),
             loaded_from_store: true,
+            gate_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
     fn lock(&self) -> MutexGuard<'_, CalibInner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The wake source the contention gate waits on: fired whenever a
+    /// dispatch leaves the registry (a prefill finished, capacity freed).
+    pub fn contention_notify(&self) -> Arc<tokio::sync::Notify> {
+        self.gate_notify.clone()
     }
 
     pub fn loaded_from_store(&self) -> bool {
@@ -493,9 +505,18 @@ impl RuntimeCalibration {
     }
 
     /// Remove a finished dispatch (idempotent: unknown ids are ignored).
+    /// Wakes contention-gate waiters AFTER the removal so they re-price
+    /// against the smaller load.
     pub fn unregister_dispatch(&self, ticket: &DispatchTicket) {
-        let mut g = self.lock();
-        g.registry.retain(|e| e.id != ticket.id);
+        let removed = {
+            let mut g = self.lock();
+            let before = g.registry.len();
+            g.registry.retain(|e| e.id != ticket.id);
+            g.registry.len() < before
+        };
+        if removed {
+            self.gate_notify.notify_waiters();
+        }
     }
 
     /// Server-wide count of dispatches estimated to be prefilling.

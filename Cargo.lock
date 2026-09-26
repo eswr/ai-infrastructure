@@ -698,6 +698,7 @@ dependencies = [
  "inference-lab-worker-lifecycle",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 

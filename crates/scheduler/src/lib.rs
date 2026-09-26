@@ -371,6 +371,14 @@ pub enum SelectOutcome {
     Decided(RouteDecision),
     /// Every registered worker is unhealthy.
     AllUnhealthy,
+    /// The contention gate held this arrival: the measured curve says one
+    /// more prefill would lower aggregate throughput. Nothing was
+    /// reserved. The caller waits (see [`Router::contention_notify`] /
+    /// [`Router::contention_gate_hold`]) and re-selects.
+    Held {
+        active_prefills: usize,
+        marginal_gain: f64,
+    },
 }
 
 /// Result of a non-reserving selection (compat path).
@@ -406,11 +414,22 @@ pub struct RouterConfig {
     /// cache-aware ECT — the knob that separates "free local hit" from
     /// "not worth a sticky decision". 0 disables the floor.
     pub min_cache_savings_ms: f64,
+    /// Contention gate (phase 4C): when the measured curve says one more
+    /// concurrent prefill would REDUCE aggregate prefill throughput,
+    /// slot-policy selection returns [`SelectOutcome::Held`] instead of
+    /// reserving — the caller waits for the machine to exit its
+    /// anti-scaling region (or for the hold cap) and re-selects. Requests
+    /// whose every candidate offers full cache reuse never hold (they add
+    /// no prefill), and client-pinned dispatches bypass the gate.
+    pub contention_gate: bool,
+    /// How long a held request may wait before it dispatches anyway
+    /// (spills through the anti-scaling region).
+    pub gate_max_hold_s: f64,
 }
 
 impl Default for RouterConfig {
     fn default() -> Self {
-        Self { min_cache_savings_ms: 0.0 }
+        Self { min_cache_savings_ms: 0.0, contention_gate: false, gate_max_hold_s: 20.0 }
     }
 }
 
@@ -933,7 +952,38 @@ impl Router {
     /// a burst therefore each see the earlier reservations — eight
     /// simultaneous least-work arrivals land on eight different slots
     /// instead of racing onto one.
+    ///
+    /// With [`RouterConfig::contention_gate`] on, slot-policy selections
+    /// that would push the server past its measured prefill saturation
+    /// point return [`SelectOutcome::Held`] instead (nothing reserved).
     pub fn select_reserved(&self, req: RequestShape) -> SelectOutcome {
+        self.select_reserved_inner(req, self.config.contention_gate)
+    }
+
+    /// Same selection with the contention gate bypassed — the spill path
+    /// for an arrival whose hold cap expired.
+    pub fn select_reserved_forced(&self, req: RequestShape) -> SelectOutcome {
+        self.select_reserved_inner(req, false)
+    }
+
+    /// The gate's wake source (Some only when the gate is on): fired
+    /// whenever a dispatch leaves the server's registry, so held arrivals
+    /// re-price instead of polling.
+    pub fn contention_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
+        if !self.config.contention_gate {
+            return None;
+        }
+        Some(self.workers.first()?.calibration().contention_notify())
+    }
+
+    /// The hold cap for one gate hold (`None` = gate off).
+    pub fn contention_gate_hold(&self) -> Option<std::time::Duration> {
+        self.config
+            .contention_gate
+            .then(|| std::time::Duration::from_secs_f64(self.config.gate_max_hold_s.max(0.0)))
+    }
+
+    fn select_reserved_inner(&self, req: RequestShape, gate: bool) -> SelectOutcome {
         let _guard = self.select_lock.lock().unwrap_or_else(|e| e.into_inner());
         let candidates = self.healthy_workers();
         if candidates.is_empty() {
@@ -1001,6 +1051,26 @@ impl Router {
             | RoutingPolicy::SlotCacheAwareEct => {
                 let views = self.views(&candidates, &req);
                 let chosen = self.pick(&views);
+                // The contention gate (phase 4C): ask the marginal question
+                // for the dispatch that would actually happen. A winner
+                // with full cache reuse adds no prefill — joining cache is
+                // never an anti-scaling act, so only recomputing dispatches
+                // can be held. Client pins never reach this path.
+                if gate {
+                    if let Some(cal) = candidates.first().map(|w| w.calibration()) {
+                        let active = cal.active_prefills();
+                        let recompute =
+                            req.input_tokens.saturating_sub(views[chosen].reusable_tokens);
+                        if recompute > 0 && !cal.prefill_marginal_pays(active) {
+                            let gain = if active == 0 {
+                                1.0
+                            } else {
+                                cal.prefill_marginal_gain(active)
+                            };
+                            return SelectOutcome::Held { active_prefills: active, marginal_gain: gain };
+                        }
+                    }
+                }
                 let reason = self.slot_reason(&views, chosen);
                 let bypass = self.bypass_record(&views, chosen);
                 let winner = candidates[chosen].clone();
@@ -1270,6 +1340,9 @@ mod tests {
     fn decided(out: SelectOutcome) -> RouteDecision {
         match out {
             SelectOutcome::Decided(d) => d,
+            SelectOutcome::Held { active_prefills, marginal_gain } => panic!(
+                "expected a decision, got Held (active={active_prefills}, gain={marginal_gain})"
+            ),
             SelectOutcome::AllUnhealthy => panic!("expected a decision"),
         }
     }
@@ -1665,7 +1738,7 @@ mod tests {
                 })
                 .collect(),
             RoutingPolicy::SlotCacheAwareEct,
-            RouterConfig { min_cache_savings_ms: 10_000.0 },
+            RouterConfig { min_cache_savings_ms: 10_000.0, ..Default::default() },
         )
         .unwrap();
         // A slot that only ever held a tiny probe prompt (100 real tokens)
@@ -1705,5 +1778,144 @@ mod tests {
         assert!(w.is_prefilling());
         w.end_work(&t);
         assert!(!w.is_prefilling());
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 4C: the contention gate
+    // ---------------------------------------------------------------------
+
+    /// Shared calibration carrying a measured anti-scaling prefill curve
+    /// (multipliers 1.0 / 1.43 / 2.86 / 8.33: aggregate throughput peaks
+    /// at two concurrent prefills, sags to ~1.05 by bucket 3-4 and 0.60
+    /// at 5-8) plus loaded decode rates.
+    fn anti_scaling_cal() -> Arc<RuntimeCalibration> {
+        let profile = CalibrationProfile {
+            schema_version: calibration::SCHEMA_VERSION,
+            bucket_labels: ["1".into(), "2".into(), "3-4".into(), "5-8".into()],
+            machine: "apple-m5".into(),
+            runtime: "llama-cpp".into(),
+            model: "m".into(),
+            slot_count: 8,
+            updated_at_epoch_s: 0,
+            prefill: calibration::PrefillCalibration {
+                fixed_ms: 250.0,
+                ms_per_token: 6.2,
+                samples: 40,
+                contention_multiplier: [1.0, 1.43, 2.86, 8.33],
+                contention_samples: [40, 4, 8, 8],
+            },
+            decode: calibration::DecodeCalibration {
+                ms_per_token: [450.0, 1200.0, 1200.0, 1200.0],
+                samples: [10, 4, 6, 8],
+            },
+        };
+        Arc::new(RuntimeCalibration::from_profile(&profile, llama_defaults()))
+    }
+
+    fn gated_router(cal: Arc<RuntimeCalibration>) -> Router {
+        Router::with_config(
+            (0..8)
+                .map(|i| {
+                    let mut h = WorkerHandle::with_calibration(
+                        format!("s{i}"), format!("http://s{i}"), "m", "llama", cal.clone(),
+                    );
+                    h.slot = Some(i as u32);
+                    h.record_transport_success();
+                    h.request_served();
+                    Arc::new(h)
+                })
+                .collect(),
+            RoutingPolicy::SlotCacheAwareEct,
+            RouterConfig { contention_gate: true, gate_max_hold_s: 20.0, ..Default::default() },
+        )
+        .unwrap()
+    }
+
+    /// Release a decision's reservation so a test's registry state stays
+    /// exactly what it scripted (decisions reserve on the shared cal).
+    fn release(d: &RouteDecision) {
+        d.worker.end_work(&d.work_start);
+    }
+
+    #[test]
+    fn contention_gate_holds_in_the_measured_anti_scaling_region() {
+        let cal = anti_scaling_cal();
+        let r = gated_router(cal.clone());
+        // Two active prefills: joining as the third crosses into bucket
+        // 3-4 where the measured aggregate (1.05) is below the current
+        // (1.40) — the gate must hold, with nothing reserved.
+        let t1 = cal.register_dispatch(600_000.0, f64::MAX);
+        let t2 = cal.register_dispatch(600_000.0, f64::MAX);
+        match r.select_reserved(shape(7, 8400, 256)) {
+            SelectOutcome::Held { active_prefills, marginal_gain } => {
+                assert_eq!(active_prefills, 2);
+                assert!(marginal_gain < 1.0, "held because gain {marginal_gain} < 1");
+            }
+            _ => panic!("the gate must hold an anti-scaling join"),
+        }
+        assert!(r.workers().iter().all(|w| w.outstanding() == 0), "held = no reservation");
+
+        // Full-reuse winner dispatches anyway: joining cache adds no
+        // prefill, so the marginal-prefill question does not apply.
+        r.workers()[0].note_slot_completion(7, 11_400, 11_400);
+        let d = decided(r.select_reserved(shape(7, 8400, 256)));
+        assert_eq!(d.reason, DecisionReason::CacheHitCheapest);
+        release(&d);
+
+        // Spill path: the hold cap expired, dispatch regardless.
+        let d = decided(r.select_reserved_forced(shape(7, 8400, 256)));
+        assert_eq!(d.candidates.len(), 8);
+        release(&d);
+
+        // A prefill finishing drops the load to 1; entering bucket 2 pays
+        // (aggregate 1.40 > 1.00) — the gate re-opens.
+        cal.unregister_dispatch(&t1);
+        cal.unregister_dispatch(&t2);
+        let d = decided(r.select_reserved(shape(7, 8400, 256)));
+        release(&d);
+    }
+
+    #[test]
+    fn contention_gate_never_holds_a_flat_or_idle_machine() {
+        let cal = Arc::new(RuntimeCalibration::from_seeds(
+            "apple-m5", "llama-cpp", "m", 8, llama_defaults(),
+        ));
+        let r = gated_router(cal.clone());
+        // Distinct prefix per probe: no slot may hold reuse for it, or the
+        // arrival would be a cache join (which never adds prefill and is
+        // never the gate's business).
+        let probe = |r: &Router, n: u64| r.select_reserved(shape(n, 8400, 256));
+        // Idle: pays by definition. Within-bucket joins: unmeasured, allowed.
+        for active in 0..8u64 {
+            let tickets: Vec<_> = (0..active)
+                .map(|_| cal.register_dispatch(600_000.0, f64::MAX))
+                .collect();
+            let d = decided(probe(&r, 100 + active));
+            release(&d);
+            for t in tickets {
+                cal.unregister_dispatch(&t);
+            }
+        }
+        // At the envelope (8 active) the gate holds even on a flat curve —
+        // the ninth prefill has no measured defense.
+        let tickets: Vec<_> = (0..8).map(|_| cal.register_dispatch(600_000.0, f64::MAX)).collect();
+        assert!(matches!(probe(&r, 999), SelectOutcome::Held { .. }));
+        for t in tickets {
+            cal.unregister_dispatch(&t);
+        }
+    }
+
+    #[test]
+    fn client_pins_bypass_the_contention_gate() {
+        let cal = anti_scaling_cal();
+        let r = gated_router(cal.clone());
+        let _t1 = cal.register_dispatch(600_000.0, f64::MAX);
+        let _t2 = cal.register_dispatch(600_000.0, f64::MAX);
+        // Cache warmers are infrastructure: a pinned dispatch is honored
+        // even inside the anti-scaling region.
+        let shape = RequestShape { pinned_slot: Some(5), ..shape(7, 8400, 256) };
+        let d = decided(r.select_reserved(shape));
+        assert_eq!(d.worker.slot, Some(5));
+        assert_eq!(d.reason, DecisionReason::ClientPinned);
     }
 }

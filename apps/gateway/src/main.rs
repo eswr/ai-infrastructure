@@ -56,6 +56,12 @@
 //! * `ADMIT_MAX_ACTIVE_OUTPUT_TOKENS` decode budget, 0 = off (default 0)
 //! * `ADMIT_MAX_WORK_MS`  per-request estimated-work cap, 0 = off
 //! * `ADMIT_DEGRADED_QUEUE_S` / `ADMIT_OVERLOADED_QUEUE_S` (5 / 30)
+//! * `ADMIT_MARGINAL_COST`  1 = the 4C contention gate: arrivals whose
+//!   prefill would land in the measured anti-scaling region (the calibrated
+//!   curve says one more concurrent prefill REDUCES aggregate throughput)
+//!   hold until capacity frees, up to `CONTENTION_GATE_MAX_HOLD_S`
+//!   (default 20, then dispatch anyway). Full-cache-reuse joins and
+//!   client-pinned warmers never hold.
 //! * `FIRST_TOKEN_TIMEOUT_S` abort streams with no first token (0 = off)
 //! * `STREAM_STALL_TIMEOUT_S` abort streams that stop producing tokens
 //!   mid-generation (0 = off; the 193 s mlx-lm stall detector)
@@ -448,16 +454,87 @@ async fn chat_completions(
         pinned_slot: req.id_slot,
     };
     let sel_span = telemetry::child_span(&root, "scheduler.select", SpanKind::Internal, vec![]);
-    let mut decision = match st.router.select_reserved(shape) {
-        SelectOutcome::Decided(d) => d,
-        SelectOutcome::AllUnhealthy => {
-            sel_span.span().end();
-            st.metrics.requests_total.with_label_values(&["no_worker"]).inc();
-            root.span().set_attribute(KeyValue::new("inference.outcome", "no_worker"));
-            root.span().end();
-            return error_json(StatusCode::SERVICE_UNAVAILABLE, "no healthy workers");
+    // Contention gate (phase 4C): when the measured curve says one more
+    // prefill would REDUCE aggregate throughput, the router returns Held
+    // with nothing reserved. Wait here — bounded by the hold cap — for the
+    // machine to exit its anti-scaling region, re-pricing on every dispatch
+    // completion (the calibration's Notify) plus a bounded-latency fallback
+    // tick. Nothing is queued at admission: the arrival simply hasn't been
+    // dispatched yet, and a client disconnect still cancels everything.
+    let mut gate_holds: u64 = 0;
+    let mut gate_held = Duration::ZERO;
+    let mut decision = loop {
+        match st.router.select_reserved(shape) {
+            SelectOutcome::Decided(d) => break d,
+            SelectOutcome::AllUnhealthy => {
+                sel_span.span().end();
+                st.metrics.requests_total.with_label_values(&["no_worker"]).inc();
+                root.span().set_attribute(KeyValue::new("inference.outcome", "no_worker"));
+                root.span().end();
+                return error_json(StatusCode::SERVICE_UNAVAILABLE, "no healthy workers");
+            }
+            SelectOutcome::Held { active_prefills, marginal_gain } => {
+                gate_holds += 1;
+                st.metrics.scheduler_contention_gate_holds_total.inc();
+                let max_hold = st.router.contention_gate_hold().unwrap_or_default();
+                let wake = st.router.contention_notify();
+                let held_at = Instant::now();
+                tracing::info!(
+                    target: "gateway::routing",
+                    active_prefills,
+                    marginal_gain,
+                    max_hold_s = max_hold.as_secs_f64(),
+                    "contention gate: holding arrival in measured anti-scaling region"
+                );
+                let mut spilled = false;
+                loop {
+                    if held_at.elapsed() >= max_hold {
+                        spilled = true;
+                        break;
+                    }
+                    match &wake {
+                        Some(n) => tokio::select! {
+                            _ = n.notified() => break, // capacity freed: re-price now
+                            // A missed wake (one-shot notifies) costs 100 ms,
+                            // never the hold cap.
+                            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                        },
+                        None => tokio::time::sleep(Duration::from_millis(50)).await,
+                    }
+                }
+                gate_held += held_at.elapsed();
+                if spilled {
+                    st.metrics.scheduler_contention_gate_spills_total.inc();
+                    tracing::warn!(
+                        active_prefills,
+                        marginal_gain,
+                        held_s = gate_held.as_secs_f64(),
+                        "contention gate: hold cap exceeded, dispatching anyway"
+                    );
+                    match st.router.select_reserved_forced(shape) {
+                        SelectOutcome::Decided(d) => break d,
+                        _ => {
+                            sel_span.span().end();
+                            st.metrics.requests_total.with_label_values(&["no_worker"]).inc();
+                            root.span().set_attribute(KeyValue::new("inference.outcome", "no_worker"));
+                            root.span().end();
+                            return error_json(StatusCode::SERVICE_UNAVAILABLE, "no healthy workers");
+                        }
+                    }
+                }
+            }
         }
     };
+    if gate_holds > 0 {
+        root.span().set_attribute(KeyValue::new("scheduler.contention_gate_holds", gate_holds as i64));
+        root.span().set_attribute(KeyValue::new(
+            "scheduler.contention_gate_held_ms",
+            gate_held.as_millis() as i64,
+        ));
+        st.metrics
+            .scheduler_contention_gate_hold_seconds
+            .observe(gate_held.as_secs_f64());
+    }
     record_decision(&st, &root, Some(&sel_span), &decision, shape.prefix_hash);
     sel_span.span().end();
 
@@ -770,6 +847,12 @@ async fn status(State(st): State<Arc<AppState>>) -> Response {
             })
         })
         .collect();
+    let gate_active_prefills = st
+        .calibrations
+        .first()
+        .map(|c| c.cal.active_prefills())
+        .unwrap_or(0);
+    let gate_cal = st.calibrations.first().map(|c| &c.cal);
     Json(serde_json::json!({
         "admission": {
             "enabled": snap.enabled,
@@ -781,6 +864,13 @@ async fn status(State(st): State<Arc<AppState>>) -> Response {
             "queued_output_tokens": snap.queued_output_tokens,
             "estimated_queue_seconds": snap.estimated_queue_seconds,
             "load_state": snap.load_state.as_str(),
+        },
+        "contention_gate": {
+            "enabled": st.router.config().contention_gate,
+            "max_hold_s": st.router.config().gate_max_hold_s,
+            "active_prefills": gate_active_prefills,
+            "marginal_pays": gate_cal
+                .map(|c| c.prefill_marginal_pays(gate_active_prefills)),
         },
         "policy": st.router.policy().as_str(),
         "calibration": calibration_json,
@@ -1164,8 +1254,24 @@ async fn main() -> anyhow::Result<()> {
 
     let router_config = RouterConfig {
         min_cache_savings_ms: env_f64("SCHEDULER_MIN_CACHE_SAVINGS_MS", 0.0),
+        // ADMIT_MARGINAL_COST=1: the contention-aware concurrency policy —
+        // arrivals whose prefill would land in the measured anti-scaling
+        // region hold until the machine can use them (phase 4C).
+        contention_gate: std::env::var("ADMIT_MARGINAL_COST").ok().as_deref() == Some("1"),
+        gate_max_hold_s: env_f64("CONTENTION_GATE_MAX_HOLD_S", 20.0),
     };
     let router = Arc::new(WorkerRouter::with_config(handles, policy, router_config)?);
+    if router_config.contention_gate {
+        tracing::info!(
+            max_hold_s = router_config.gate_max_hold_s,
+            "contention gate enabled: arrivals are held when the measured curve \
+             says their prefill would reduce aggregate throughput"
+        );
+        if !policy.is_slot_policy() {
+            tracing::warn!("ADMIT_MARGINAL_COST=1 with a non-slot policy: the gate only \
+                            acts on slot-policy selections");
+        }
+    }
     let admission = AdmissionController::new(admission_policy);
     let first_token_timeout = env_f64("FIRST_TOKEN_TIMEOUT_S", 0.0);
     let stream_stall_timeout = env_f64("STREAM_STALL_TIMEOUT_S", 0.0);

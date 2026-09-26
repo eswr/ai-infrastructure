@@ -146,6 +146,13 @@ pub struct Metrics {
     /// insufficient_benefit. The interesting number next to the hit rate:
     /// "locality was available, and the router refused it on purpose".
     pub scheduler_cache_affinity_bypassed_total: IntCounterVec,
+    /// Arrivals the contention gate HELD (phase 4C): the measured curve
+    /// said their prefill would reduce aggregate throughput.
+    pub scheduler_contention_gate_holds_total: prometheus::Counter,
+    /// Held arrivals whose hold cap expired — dispatched anyway.
+    pub scheduler_contention_gate_spills_total: prometheus::Counter,
+    /// Time arrivals spent held by the contention gate.
+    pub scheduler_contention_gate_hold_seconds: Histogram,
     /// The routing equation's TTFT estimate for the chosen slot at
     /// decision time (the model's prediction, before reality answers).
     pub scheduler_estimated_ttft_seconds: Histogram,
@@ -528,6 +535,19 @@ impl Metrics {
         ] {
             scheduler_cache_affinity_bypassed_total.with_label_values(&[reason]);
         }
+        let scheduler_contention_gate_holds_total = prometheus::Counter::new(
+            "scheduler_contention_gate_holds_total",
+            "Arrivals held by the contention gate (measured anti-scaling region)",
+        )?;
+        let scheduler_contention_gate_spills_total = prometheus::Counter::new(
+            "scheduler_contention_gate_spills_total",
+            "Held arrivals dispatched anyway after the hold cap expired",
+        )?;
+        let scheduler_contention_gate_hold_seconds = h(
+            "scheduler_contention_gate_hold_seconds",
+            "Time arrivals spent held by the contention gate",
+            stall_buckets(),
+        )?;
         let scheduler_estimated_ttft_seconds = h(
             "scheduler_estimated_ttft_seconds",
             "Router's estimated TTFT for the chosen slot at decision time",
@@ -651,6 +671,9 @@ impl Metrics {
         reg!(registry, empty_completions_total);
         reg!(registry, scheduler_affinity_opportunities_total);
         reg!(registry, scheduler_cache_affinity_bypassed_total);
+        reg!(registry, scheduler_contention_gate_holds_total);
+        reg!(registry, scheduler_contention_gate_spills_total);
+        reg!(registry, scheduler_contention_gate_hold_seconds);
         reg!(registry, scheduler_estimated_ttft_seconds);
         reg!(registry, scheduler_estimated_queue_cost_seconds);
         reg!(registry, scheduler_estimated_cache_savings_seconds);
@@ -718,6 +741,9 @@ impl Metrics {
             empty_completions_total,
             scheduler_affinity_opportunities_total,
             scheduler_cache_affinity_bypassed_total,
+            scheduler_contention_gate_holds_total,
+            scheduler_contention_gate_spills_total,
+            scheduler_contention_gate_hold_seconds,
             scheduler_estimated_ttft_seconds,
             scheduler_estimated_queue_cost_seconds,
             scheduler_estimated_cache_savings_seconds,
