@@ -163,12 +163,6 @@ pub struct Queued {
     notify: Notify,
 }
 
-impl Queued {
-    pub fn class(&self) -> ServiceClass {
-        self.size.class
-    }
-}
-
 pub enum AdmissionDecision {
     /// Budgets fit and nobody was waiting — dispatch now; the permit owns
     /// the granted capacity.

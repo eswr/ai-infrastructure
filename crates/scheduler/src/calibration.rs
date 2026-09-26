@@ -313,8 +313,16 @@ pub struct DispatchTicket {
 
 struct RegistryEntry {
     id: u64,
-    started: Instant,
-    est_prefill_ms: f64,
+    /// True once the dispatch OBSERVED its first token (phase 4C fix).
+    /// The 4B.3 classifier used the *estimate* (`elapsed < est_prefill_ms`)
+    /// to decide "still prefilling" — but under contention the estimate
+    /// expires long before the real prefill does, so contended peers
+    /// flipped to "decoding" and contention samples never accumulated
+    /// (measured in the 4C smoke: contention_samples stayed [0,0,0,0]
+    /// through an entire study while the solo regression ate every
+    /// loaded observation). Truth over estimates: a dispatch is
+    /// prefilling until its first token is SEEN.
+    prefill_done: bool,
 }
 
 struct CalibInner {
@@ -492,16 +500,14 @@ impl RuntimeCalibration {
     /// Register a dispatch (reservation time) and mint its ticket. The
     /// registry is what "how many streams are active" counts — reservations
     /// count, because a burst prices each other in before any bytes move.
-    pub fn register_dispatch(&self, est_total_ms: f64, est_prefill_ms: f64) -> DispatchTicket {
+    /// A registered dispatch counts as PREFILLING until its first token is
+    /// observed (see [`RegistryEntry::prefill_done`]).
+    pub fn register_dispatch(&self, est_total_ms: f64, _est_prefill_ms: f64) -> DispatchTicket {
         let mut g = self.lock();
         let id = g.next_id;
         g.next_id += 1;
-        g.registry.push(RegistryEntry {
-            id,
-            started: Instant::now(),
-            est_prefill_ms,
-        });
-        DispatchTicket { start: Instant::now(), id, est_total_ms, est_prefill_ms }
+        g.registry.push(RegistryEntry { id, prefill_done: false });
+        DispatchTicket { start: Instant::now(), id, est_total_ms, est_prefill_ms: _est_prefill_ms }
     }
 
     /// Remove a finished dispatch (idempotent: unknown ids are ignored).
@@ -519,58 +525,90 @@ impl RuntimeCalibration {
         }
     }
 
-    /// Server-wide count of dispatches estimated to be prefilling.
+    /// Server-wide count of dispatches that have NOT yet seen a first
+    /// token — reservations and running prefills alike (a reserved slot
+    /// will prefill; its compute is already spoken for).
     pub fn active_prefills(&self) -> usize {
         let g = self.lock();
-        g.registry.iter().filter(|e| e.started.elapsed().as_secs_f64() * 1000.0 < e.est_prefill_ms).count()
+        g.registry.iter().filter(|e| !e.prefill_done).count()
     }
 
-    /// Server-wide count of dispatches past their estimated prefill —
-    /// the decode-load signal. `8 requests in prefill` and `8 requests
-    /// decoding` have radically different consequences; never conflate.
+    /// Server-wide count of dispatches that have produced their first
+    /// token — the decode-load signal. `8 requests in prefill` and
+    /// `8 requests decoding` have radically different consequences; never
+    /// conflate.
     pub fn active_decodes(&self) -> usize {
         let g = self.lock();
-        g.registry.iter().filter(|e| e.started.elapsed().as_secs_f64() * 1000.0 >= e.est_prefill_ms).count()
+        g.registry.iter().filter(|e| e.prefill_done).count()
     }
 
     // -- learning ----------------------------------------------------------------
 
-    /// Feed one prefill observation (response headers → first token, ms)
-    /// that ran under `bucket(peers + 1)` concurrent prefills, where `peers`
-    /// excludes the observed dispatch itself. The SOLO regression learns
-    /// only from unloaded (bucket-1) observations — feeding 8-way-parallel
-    /// prefills into it is how a contention penalty becomes "the rate"
-    /// (the exact one-rate-for-all-loads mistake this module exists to
-    /// remove). Loaded observations update their bucket's contention
-    /// multiplier against the current solo rate instead.
+    /// Feed one prefill observation AT FIRST-TOKEN TIME (response headers
+    /// → first token, ms): marks the dispatch's prefill as done and
+    /// records what the prefill cost under `bucket(prefill-peers + 1)`
+    /// concurrent prefills, where prefill-peers are the other dispatches
+    /// that have not yet seen their own first token. Observing and
+    /// marking in one step is the point: the peers counted are exactly
+    /// those still prefilling when THIS prefill finished — by observed
+    /// truth, not by an estimate that expires early under contention
+    /// (the 4B.3/4C-smoke failure).
     ///
-    /// Contention curve semantics (phase 4C, after the 4B.3 profile came
-    /// out degenerate): the multiplier is a *slowdown* factor — it can only
-    /// be ≥ 1.0, because a second prefill cannot make this one cheaper per
-    /// token. Bucket 1 IS the solo definition, so its multiplier is pinned
-    /// at exactly 1.0 and never updated: a v1 profile that learned 0.5
-    /// there was papering over solo-regression drift, not measuring
-    /// contention curve semantics. Observations below the current solo rate
-    /// estimate record 1.0 (no *measured* penalty) and leave the correction
-    /// to the regression, which owns the solo level.
-    pub fn observe_prefill(&self, input_tokens: u64, worker_first_token_ms: f64, ticket: &DispatchTicket) {
+    /// `cache_hit` observations are marked but learned from nothing: a
+    /// request that joined a warm cache produced no prefill, and feeding
+    /// its tiny first-token into the solo regression poisons the rate.
+    ///
+    /// The SOLO regression learns only from unloaded (bucket-1) cold
+    /// observations — feeding 8-way-parallel prefills into it is how a
+    /// contention penalty becomes "the rate" (the one-rate-for-all-loads
+    /// mistake this module exists to remove). Loaded cold observations
+    /// update their bucket's contention multiplier instead.
+    ///
+    /// Contention curve semantics (phase 4C): the multiplier is a
+    /// *slowdown* factor — bounded ≥ 1.0, and bucket 1 is pinned at
+    /// exactly 1.0. Observations below the current solo rate estimate
+    /// record 1.0 (no *measured* penalty) and leave the correction to
+    /// the regression, which owns the solo level.
+    pub fn observe_prefill_done(
+        &self,
+        input_tokens: u64,
+        worker_first_token_ms: f64,
+        ticket: &DispatchTicket,
+        cache_hit: bool,
+    ) {
         let toks = input_tokens.max(1) as f64;
         let mut g = self.lock();
+        if let Some(e) = g.registry.iter_mut().find(|e| e.id == ticket.id) {
+            e.prefill_done = true;
+        }
         let peers = g
             .registry
             .iter()
-            .filter(|e| e.id != ticket.id && e.started.elapsed().as_secs_f64() * 1000.0 < e.est_prefill_ms)
+            .filter(|e| e.id != ticket.id && !e.prefill_done)
             .count();
+        if cache_hit {
+            self.dirty.store(true, Ordering::Relaxed);
+            return;
+        }
+        let ms_per_tok = worker_first_token_ms / toks;
         if peers == 0 {
+            // Outlier guard for the solo regression: a first-of-boot
+            // prefill can carry Metal JIT/allocation costs an order of
+            // magnitude above the true rate; one such step (α = 0.05)
+            // takes many clean observations to wash out. Anything > 8×
+            // the current estimate is treated as boot noise for the
+            // regression (contention buckets are capped separately).
+            if g.prefill.samples >= 2 && ms_per_tok > 8.0 * g.prefill.rate.max(0.1) {
+                self.dirty.store(true, Ordering::Relaxed);
+                return;
+            }
             g.prefill.observe(toks, worker_first_token_ms);
-            // Bucket 1 stays pinned; the regression is the bucket-1 model.
             self.dirty.store(true, Ordering::Relaxed);
             return;
         }
         // Contention vs the *solo* rate. The clamp band starts at 1.0:
         // measured ms/token under load below the solo estimate means the
         // solo estimate drifted high, not that contention sped anything up.
-        let ms_per_tok = worker_first_token_ms / toks;
         if g.prefill.rate > 0.1 {
             let mult_obs = (ms_per_tok / g.prefill.rate).clamp(1.0, 16.0);
             let b = bucket_index(peers + 1);
@@ -840,21 +878,21 @@ mod tests {
     #[test]
     fn decode_buckets_learn_and_fall_back_upward() {
         let c = cal();
-        // One loaded observation in bucket 5-8: 8 peers + self = 9 streams
-        // is bucket 5-8; simulate by registering 8 long-decode dispatches.
+        // One loaded observation in bucket 5-8: 8 peers + self = 9 streams.
+        // The peers have SEEN first tokens (marked via cache-hit prefill
+        // observations, which flip their phase without teaching anything);
+        // the observed dispatch itself has not.
         let mut tickets = Vec::new();
         for _ in 0..8 {
-            tickets.push(c.register_dispatch(600_000.0, 1.0)); // will read "decoding"
+            let tk = c.register_dispatch(600_000.0, 1.0);
+            c.observe_prefill_done(100, 300.0, &tk, true);
+            tickets.push(tk);
         }
-        // The registry classifies by elapsed-vs-estimated-prefill; give the
-        // peers their 1 ms so they count as decode streams.
-        std::thread::sleep(std::time::Duration::from_millis(5));
         let t = c.register_dispatch(600_000.0, 1.0);
-        // The registry classifies SELF by elapsed-vs-est-prefill (just
-        // registered → still "prefilling"), while the OBSERVATION buckets
-        // by peers+1 — 8 decode peers means this decode ran at load 9.
         assert_eq!(c.active_decodes(), 8);
         assert_eq!(c.active_prefills(), 1);
+        // Decode bucketing counts EVERY stream on the server (decodes and
+        // still-prefilling peers alike) — 8 peers means load 9.
         c.observe_decode(256, 256.0 * 250.0, &t); // 250 ms/tok under 9 streams
         for tk in &tickets {
             c.unregister_dispatch(tk);
@@ -886,8 +924,8 @@ mod tests {
         for i in 0..60 {
             let toks = 500 + (i % 7) * 350;
             c.unregister_dispatch(&t);
-            t = c.register_dispatch(1.0, f64::MAX); // stays "prefilling"
-            c.observe_prefill(toks, 100.0 + 6.0 * toks as f64, &t);
+            t = c.register_dispatch(1.0, f64::MAX);
+            c.observe_prefill_done(toks, 100.0 + 6.0 * toks as f64, &t, false);
         }
         assert!((c.prefill_base().1 - 6.0).abs() < 0.5, "solo rate learned: {}", c.prefill_base().1);
 
@@ -898,8 +936,10 @@ mod tests {
         }
         c.unregister_dispatch(&t); // the training dispatch leaves the server
         let tk = c.register_dispatch(1.0, f64::MAX);
-        assert_eq!(c.active_prefills(), 8);
-        c.observe_prefill(8400, 8400.0 * 15.0, &tk); // 15 ms/tok vs ~6 solo
+        assert_eq!(c.active_prefills(), 8, "unmarked dispatches are prefilling");
+        c.observe_prefill_done(8400, 8400.0 * 15.0, &tk, false); // 15 ms/tok vs ~6 solo
+        assert_eq!(c.active_decodes(), 1, "the observation marked this dispatch done");
+        assert_eq!(c.active_prefills(), 7);
         let mult = c.contention_for(8);
         assert!(mult > 1.2, "contention multiplier learned upward: {mult}");
         // Prediction reflects it: 8-way prefill prices above the solo rate.
@@ -928,17 +968,16 @@ mod tests {
             let toks = 500 + (i % 7) * 350;
             c.unregister_dispatch(&t);
             t = c.register_dispatch(1.0, f64::MAX);
-            c.observe_prefill(toks, 100.0 + 12.0 * toks as f64, &t); // 12 ms/tok solo
+            c.observe_prefill_done(toks, 100.0 + 12.0 * toks as f64, &t, false); // 12 ms/tok solo
         }
         let peers: Vec<_> = (0..3).map(|_| c.register_dispatch(1.0, f64::MAX)).collect();
         c.unregister_dispatch(&t);
         let tk = c.register_dispatch(1.0, f64::MAX);
-        c.observe_prefill(2000, 2000.0 * 4.0, &tk); // 4 ms/tok under 4-way load
+        c.observe_prefill_done(2000, 2000.0 * 4.0, &tk, false); // 4 ms/tok under 4-way load
         let (curve, samples) = c.prefill_contention_curve();
         assert_eq!(samples[2], 1);
         assert_eq!(curve[2], 1.0, "sub-solo observation clamps to no-penalty");
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        c.observe_prefill(2000, 2000.0 * 20.0, &tk); // 20 ms/tok: real penalty
+        c.observe_prefill_done(2000, 2000.0 * 20.0, &tk, false); // 20 ms/tok: real penalty
         let (curve, _) = c.prefill_contention_curve();
         assert!(curve[2] > 1.0, "later real penalty still learns: {}", curve[2]);
         for p in peers {
@@ -958,11 +997,11 @@ mod tests {
         for _ in 0..4 {
             prefills.push(c.register_dispatch(600_000.0, f64::MAX));
         }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        let t = c.register_dispatch(600_000.0, 1.0); // this one is "decoding"
-        std::thread::sleep(std::time::Duration::from_millis(2)); // past its 1ms prefill window
+        let t = c.register_dispatch(600_000.0, 1.0);
+        // This one SEES its first token: observed truth flips its phase.
+        c.observe_prefill_done(1024, 3000.0, &t, false);
         c.observe_decode(64, 64.0 * 300.0, &t);
-        assert_eq!(c.active_prefills(), 4, "the prefill peers are still prefilling");
+        assert_eq!(c.active_prefills(), 4, "the prefill peers have not seen tokens");
         assert_eq!(c.active_decodes(), 1);
         let (_, samples) = c.decode_curve();
         assert_eq!(samples, [0, 0, 0, 1], "decode under 5 total streams → bucket 5-8");
@@ -1016,20 +1055,45 @@ mod tests {
     }
 
     #[test]
-    fn registry_counts_split_by_phase() {
+    fn registry_counts_split_by_observed_phase() {
         let c = cal();
-        // Two fresh prefills, one dispatch old enough to be "decoding".
+        // Two unmarked dispatches are prefilling; one that has seen its
+        // first token is decoding — regardless of what any estimate said.
         let _a = c.register_dispatch(10_000.0, 9_000.0);
         let _b = c.register_dispatch(10_000.0, 9_000.0);
         let old = c.register_dispatch(60_000.0, 1.0);
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        assert_eq!(c.active_prefills(), 2, "a and b are inside their prefill window");
-        assert_eq!(c.active_decodes(), 1, "old is past its tiny prefill estimate");
+        c.observe_prefill_done(64, 200.0, &old, true); // cache hit: marks only
+        assert_eq!(c.active_prefills(), 2);
+        assert_eq!(c.active_decodes(), 1);
         c.unregister_dispatch(&old);
         assert_eq!(c.active_decodes(), 0);
         // Idempotent unregister.
         c.unregister_dispatch(&old);
         assert_eq!(c.active_prefills(), 2);
+    }
+
+    #[test]
+    fn solo_regression_skips_boot_jit_outliers() {
+        // A first-of-boot prefill an order of magnitude above the seed is
+        // boot noise: it must not drag the solo rate toward the clamp.
+        let c = cal();
+        let t = c.register_dispatch(1.0, 1.0);
+        c.observe_prefill_done(1024, 1024.0 * 60.0, &t, false); // 60 ms/tok JIT-scale
+        c.unregister_dispatch(&t);
+        // ...the honest solo observations still teach the regression.
+        let mut t2 = c.register_dispatch(1.0, 1.0);
+        for i in 0..60 {
+            let toks = 500 + (i % 7) * 350;
+            c.unregister_dispatch(&t2);
+            t2 = c.register_dispatch(1.0, 1.0);
+            c.observe_prefill_done(toks, 6.0 * toks as f64, &t2, false);
+        }
+        c.unregister_dispatch(&t2);
+        assert!(
+            (c.prefill_base().1 - 6.0).abs() < 0.5,
+            "rate learned past the outlier: {}",
+            c.prefill_base().1
+        );
     }
 
     #[test]

@@ -328,6 +328,24 @@ impl<S> InstrumentedStream<S> {
         self.ctx.timeline.first_token_at = Some(now);
         self.watchdog = None; // token arrived: disarm
         self.arm_stall_watchdog(now);
+        // Phase-4C calibration: the prefill observation lands at the
+        // moment the first token proves the prefill finished. This marks
+        // the dispatch prefill_done in the server registry (so peers are
+        // classified by observed truth, not an estimate) and records what
+        // the prefill cost under whoever was still prefilling. Cache hits
+        // mark but teach nothing.
+        let wft_ms = self
+            .ctx
+            .timeline
+            .headers_at
+            .map(|h| now.duration_since(h).as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        self.ctx.worker.record_prefill_done(
+            self.ctx.timeline.est_input_tokens,
+            wft_ms,
+            &self.ctx.work_estimate,
+            self.ctx.cache_hit,
+        );
                               // Close the waiting-for-first-token span, open the streaming span.
         if let Some(cx) = self.ctx.spans.first_token.take() {
             cx.span().end();
@@ -490,12 +508,10 @@ impl<S> InstrumentedStream<S> {
             }
         }
 
-        // Adaptive service model: observations attribute to this dispatch's
-        // ticket, so the shared server calibration can bucket them by the
-        // concurrency it actually ran under.
-        if let Some(wft) = tl.worker_first_token() {
-            w.record_prefill(tl.est_input_tokens, wft.as_secs_f64() * 1000.0, &self.ctx.work_estimate);
-        }
+        // Adaptive service model: the prefill observation was recorded at
+        // first-token time (on_first_token) — the decode observation lands
+        // here, attributed to this dispatch's ticket so the shared server
+        // calibration buckets it by the concurrency it actually ran under.
         if matches!(outcome, Outcome::Completed) {
             if let (Some(dec), 2..) = (tl.decode_phase(), tl.output_tokens) {
                 w.record_decode(tl.output_tokens, dec.as_secs_f64() * 1000.0, &self.ctx.work_estimate);

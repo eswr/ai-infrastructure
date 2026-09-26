@@ -154,8 +154,13 @@ num_requests = {num_requests}
 
 
 def read_records(out_dir: Path, name: str) -> tuple[dict, list[dict]]:
-    """Latest <name>-<ts>.json under out_dir -> (summary, records)."""
-    matches = sorted(out_dir.glob(f"{name}-*.json"))
+    """Latest <name>-<ts>.json under out_dir -> (summary, records).
+
+    loadgen matrix mode nests artifacts one level down in a
+    <study>-<timestamp>/ directory (per-run files carry no extra stamp),
+    so match recursively and accept both spellings."""
+    matches = sorted(set(out_dir.glob(f"**/{name}.json"))
+                     | set(out_dir.glob(f"**/{name}-*.json")))
     if not matches:
         return {}, []
     data = json.loads(matches[-1].read_text())

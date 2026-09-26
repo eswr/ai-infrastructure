@@ -655,13 +655,22 @@ impl WorkerHandle {
         self.cal.solo_service_ms(input_tokens, output_tokens)
     }
 
-    /// Feed one `worker_first_token_ms` observation (response headers →
-    /// first streamed token; queue wait excluded by construction) for the
-    /// dispatch `ticket`. The (fixed, ms/token) split refits once observed
-    /// prompt sizes vary, and the dispatch's concurrency bucket learns its
-    /// contention multiplier.
-    pub fn record_prefill(&self, input_tokens: u64, worker_first_token_ms: f64, ticket: &DispatchTicket) {
-        self.cal.observe_prefill(input_tokens.max(1), worker_first_token_ms, ticket);
+    /// Feed one first-token observation (response headers → first streamed
+    /// token; queue wait excluded by construction) for the dispatch
+    /// `ticket`, marking its prefill phase as done in the server-wide
+    /// registry. The (fixed, ms/token) split refits once observed prompt
+    /// sizes vary; cold observations under load learn their contention
+    /// bucket's multiplier. `cache_hit` observations mark the phase but
+    /// teach nothing (a cache join produced no prefill).
+    pub fn record_prefill_done(
+        &self,
+        input_tokens: u64,
+        worker_first_token_ms: f64,
+        ticket: &DispatchTicket,
+        cache_hit: bool,
+    ) {
+        self.cal
+            .observe_prefill_done(input_tokens.max(1), worker_first_token_ms, ticket, cache_hit);
     }
 
     /// Feed one streaming observation for dispatch `ticket`: ms spent
@@ -1472,7 +1481,7 @@ mod tests {
         for i in 0..200 {
             let toks = 500 + (i % 7) * 350;
             let t = w.begin_work(1.0, f64::MAX);
-            w.record_prefill(toks as u64, 500.0 + 10.0 * toks as f64, &t);
+            w.record_prefill_done(toks as u64, 500.0 + 10.0 * toks as f64, &t, false);
             w.end_work(&t);
         }
         assert!((w.prefill_ms_per_tok() - 10.0).abs() < 1.0, "{}", w.prefill_ms_per_tok());

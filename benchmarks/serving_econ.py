@@ -218,7 +218,8 @@ def matrix_table(study: Path, legs: list[dict], md: list[str]) -> None:
 
 def class_stats(cfg_dir: Path, tag: str) -> dict | None:
     """Per-request stats for one mixed-workload class (its single-run JSON)."""
-    matches = sorted(cfg_dir.glob(f"{tag}-*.json"))
+    matches = sorted(set(cfg_dir.glob(f"**/{tag}.json"))
+                     | set(cfg_dir.glob(f"**/{tag}-*.json")))
     if not matches:
         return None
     data = json.loads(matches[-1].read_text())
