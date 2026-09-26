@@ -92,9 +92,15 @@ def gateway_env(model: str, port: int, cal_dir: str, *,
     }
     # The 4C knobs. The input budget (2 x 8K prompts) is the binding one:
     # the output budget sits at exactly the c8 demand and never bites.
+    # The overload ceiling is raised far beyond the experiment horizon
+    # (default 30s would 429 a queue of 8K requests instead of holding
+    # it): the phase question is whether the QUEUE + contention gate
+    # schedule the work well, not whether the edge refuses it.
     if admission:
         env["ADMIT_MAX_ACTIVE_INPUT_TOKENS"] = "16384"
         env["ADMIT_MAX_ACTIVE_OUTPUT_TOKENS"] = "2048"
+        env["ADMIT_DEGRADED_QUEUE_S"] = "120"
+        env["ADMIT_OVERLOADED_QUEUE_S"] = "1800"
     if gate:
         env["ADMIT_MARGINAL_COST"] = "1"
     return env
