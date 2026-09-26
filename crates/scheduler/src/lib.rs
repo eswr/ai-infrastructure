@@ -571,6 +571,13 @@ impl WorkerHandle {
         self.fixed_overhead_ms() + prefill + decode
     }
 
+    /// The shared CostModel's estimate of this request's service time on
+    /// an otherwise idle server — the number admission control budgets
+    /// with (identical to the router's starting point, by construction).
+    pub fn solo_service_estimate_ms(&self, input_tokens: u64, output_tokens: u64) -> f64 {
+        self.cal.solo_service_ms(input_tokens, output_tokens)
+    }
+
     /// Feed one `worker_first_token_ms` observation (response headers →
     /// first streamed token; queue wait excluded by construction) for the
     /// dispatch `ticket`. The (fixed, ms/token) split refits once observed

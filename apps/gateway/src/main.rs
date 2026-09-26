@@ -273,7 +273,9 @@ fn prefix_hash(req: &ChatCompletionRequest) -> u64 {
 }
 
 /// Best-case (fastest healthy worker) estimated service time, used by
-/// admission for work accounting.
+/// admission for work accounting. Consumes the SAME calibrated CostModel
+/// the router prices with (`solo_service_estimate_ms`) — admission and
+/// routing must never carry opinions from different models.
 fn est_work_ms(st: &AppState, est_in: u64, out_tok: u64) -> f64 {
     let healthy = st.router.healthy_workers();
     let candidates: &[Arc<WorkerHandle>] = if healthy.is_empty() {
@@ -283,7 +285,7 @@ fn est_work_ms(st: &AppState, est_in: u64, out_tok: u64) -> f64 {
     };
     candidates
         .iter()
-        .map(|w| w.service_time_ms(est_in, out_tok, false))
+        .map(|w| w.solo_service_estimate_ms(est_in, out_tok))
         .fold(f64::INFINITY, f64::min)
 }
 

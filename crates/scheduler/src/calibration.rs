@@ -595,6 +595,15 @@ impl RuntimeCalibration {
         }
     }
 
+    /// The single CostModel number admission control budgets with: this
+    /// request's full service time on an otherwise idle server (solo
+    /// prefill regression + solo decode bucket). Router and admission MUST
+    /// consume the same model — the 4B.2 architecture kept separate
+    /// "router is cheap / admission is expensive" opinions and they fought.
+    pub fn solo_service_ms(&self, input_tokens: u64, output_tokens: u64) -> f64 {
+        self.prefill_ms(input_tokens, 0, 1) + self.decode_rate_solo() * output_tokens as f64
+    }
+
     /// Export the current state as a persistable profile.
     pub fn snapshot_profile(&self) -> CalibrationProfile {
         let g = self.lock();
