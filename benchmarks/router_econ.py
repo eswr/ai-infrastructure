@@ -109,6 +109,107 @@ def hist_stats(metrics: dict, name: str) -> dict:
             "p50": q(0.50), "p95": q(0.95)}
 
 
+# ---------------------------------------------------------------------------
+# Phase 4B.3: prediction quality BY REGIME (labeled histogram families)
+# ---------------------------------------------------------------------------
+
+LABEL_RE = re.compile(r'\{([^}]*)\}')
+
+
+def parse_labeled_hist(metrics: dict, name: str) -> dict:
+    """{(prompt,conc,cache): {"count","sum","buckets":[(le,cum),...]}} for
+    one labeled histogram family (scheduler_*_prediction_*_seconds)."""
+    out: dict[tuple[str, str, str], dict] = {}
+    for key, v in metrics.items():
+        if not key.startswith(f"{name}_"):
+            continue
+        lm = LABEL_RE.search(key)
+        if not lm:
+            continue
+        labels = dict(
+            part.split("=", 1) for part in lm.group(1).split(",") if "=" in part
+        )
+        combo = (labels.get("prompt", "?"), labels.get("conc", "?"),
+                 labels.get("cache", "?"))
+        entry = out.setdefault(combo, {"count": 0.0, "sum": 0.0, "buckets": {}})
+        if key.endswith("_count"):
+            entry["count"] = v
+        elif key.endswith("_sum"):
+            entry["sum"] = v
+        elif "_bucket{" in key:
+            mm = re.search(r'le="([^"]+)"', key)
+            if mm:
+                le = float("inf") if mm.group(1) == "+Inf" else float(mm.group(1))
+                entry["buckets"][le] = v
+    return {k: e for k, e in out.items() if e["count"] > 0}
+
+
+def combine(series: dict, keep: tuple[int, str] | None = None) -> dict:
+    """Sum labeled-hist series across combos, optionally keeping only those
+    where series[combo] index `keep[0]` equals `keep[1]`. Bucket counts add
+    per le (all series share bucket boundaries)."""
+    combined = {"count": 0.0, "sum": 0.0, "buckets": {}}
+    for combo, e in series.items():
+        if keep and combo[keep[0]] != keep[1]:
+            continue
+        combined["count"] += e["count"]
+        combined["sum"] += e["sum"]
+        for le, c in e["buckets"].items():
+            combined["buckets"][le] = combined["buckets"].get(le, 0.0) + c
+    return combined
+
+
+def quantiles_from_buckets(buckets: dict, count: float) -> tuple[float | None, float | None]:
+    """Interpolated (p50, p95) from cumulative {le: count}."""
+    if not buckets or not count:
+        return None, None
+    ordered = sorted(buckets.items())
+
+    def q(qq: float) -> float | None:
+        target = qq * ordered[-1][1]
+        prev_le, prev_c = 0.0, 0.0
+        for le, c in ordered:
+            if c >= target:
+                if le == float("inf") or c == prev_c:
+                    return prev_le
+                return prev_le + (target - prev_c) / (c - prev_c) * (le - prev_le)
+            prev_le, prev_c = le, c
+        return None
+
+    return q(0.50), q(0.95)
+
+
+DIM_INDEX = {"prompt": 0, "conc": 1, "cache": 2}
+
+
+def regime_rows(ttft_signed: dict, ttft_abs: dict, actual_ttft_mean_s: float | None) -> list[dict]:
+    """One row per honesty split: overall + each label value, each with
+    MAE, |err| p50/p95, signed bias and relative error (MAE / mean actual
+    TTFT). This is the 'is the model honest, and WHERE is it wrong?' table."""
+    splits: list[tuple[str, str]] = [("overall", "all")]
+    for dim in ("prompt", "conc", "cache"):
+        for val in sorted({c[DIM_INDEX[dim]] for c in ttft_abs}):
+            splits.append((dim, val))
+
+    rows = []
+    for dim, val in splits:
+        keep = None if dim == "overall" else (DIM_INDEX[dim], val)
+        a = combine(ttft_abs, keep)
+        if not a["count"]:
+            continue
+        s = combine(ttft_signed, keep)
+        p50, p95 = quantiles_from_buckets(a["buckets"], a["count"])
+        mae = a["sum"] / a["count"]
+        bias = s["sum"] / s["count"] if s["count"] else None
+        rel = (mae / actual_ttft_mean_s
+               if actual_ttft_mean_s and actual_ttft_mean_s > 0 else None)
+        rows.append({
+            "split": dim, "value": val, "n": a["count"], "mae_s": mae,
+            "p50_s": p50, "p95_s": p95, "bias_s": bias, "rel_err": rel,
+        })
+    return rows
+
+
 def occupancy_summary(csv_path: Path) -> dict | None:
     """Per-slot busy-sample share from the 1 Hz /slots trace — who ran."""
     if not csv_path.exists():
@@ -154,6 +255,12 @@ def load_leg(leg_dir: Path) -> dict | None:
     pred = hist_stats(metrics, "scheduler_prediction_abs_error_seconds")
     signed = hist_stats(metrics, "scheduler_prediction_error_seconds")
     est = hist_stats(metrics, "scheduler_estimated_ttft_seconds")
+    # 4B.3: regime-split prediction quality from the labeled families.
+    ttft_abs = parse_labeled_hist(metrics, "scheduler_ttft_prediction_abs_error_seconds")
+    ttft_signed = parse_labeled_hist(metrics, "scheduler_ttft_prediction_error_seconds")
+    actual_ttft_mean = (m(metrics, "inference_ttft_seconds_sum") / m(metrics, "inference_ttft_seconds_count")
+                        if m(metrics, "inference_ttft_seconds_count") else None)
+    regimes = regime_rows(ttft_signed, ttft_abs, actual_ttft_mean) if ttft_abs else []
     return {
         "leg": leg_dir.name,
         "topology": leg_dir.name,
@@ -178,6 +285,7 @@ def load_leg(leg_dir: Path) -> dict | None:
         "est_ttft": est,
         "prediction": pred,
         "bias": signed.get("mean"),
+        "prediction_regimes": regimes,
         "decisions_per_slot": decisions_per_slot(metrics),
         "occupancy": occupancy_summary(leg_dir / "slots_occupancy.csv"),
     }
@@ -254,6 +362,21 @@ def main() -> int:
             f"| {l['topology']} | {l['policy']} | {fmt_s(est.get('mean'))} "
             f"| {fmt_s(pred['mean'])} | {fmt_s(pred.get('p50'))} | {fmt_s(pred.get('p95'))} "
             f"| {fmt_s(l['bias'])} | {pred['count']:.0f} |")
+
+    # -- prediction quality BY REGIME (4B.3) ------------------------------------
+    md += ["", "## Prediction quality by regime (4B.3: where is the model wrong?)", "",
+           "Same TTFT prediction errors, split by the regime the model priced "
+           "for. `rel err` = MAE / mean actual TTFT. Positive bias = the model "
+           "under-predicts (its gate opens too late).", "",
+           "| Leg | Split | Value | n | MAE | |err| p50 | |err| p95 | Bias | Rel err |",
+           "|---|---|---|---:|---:|---:|---:|---:|---:|"]
+    for l in matrix:
+        for r in l.get("prediction_regimes", []):
+            rel = "n/a" if r["rel_err"] is None else f"{r['rel_err']:.2f}"
+            md.append(
+                f"| {l['leg']} | {r['split']} | {r['value']} | {r['n']:.0f} "
+                f"| {fmt_s(r['mae_s'])} | {fmt_s(r['p50_s'])} | {fmt_s(r['p95_s'])} "
+                f"| {fmt_s(r['bias_s'])} | {rel} |")
 
     # -- slot occupancy ----------------------------------------------------------
     md += ["", "## Who actually ran? (slot busy share, 1 Hz /slots trace)", "",

@@ -132,6 +132,12 @@ pub struct ServerCalibration {
     pub cal: Arc<RuntimeCalibration>,
 }
 
+/// The chosen candidate row of a routing decision, if one exists
+/// (legacy policies export no candidate table).
+fn chosen_view(d: &RouteDecision) -> Option<&inference_lab_scheduler::CandidateView> {
+    d.candidates.get(d.chosen)
+}
+
 fn error_json(status: StatusCode, msg: &str) -> Response {
     let body = serde_json::json!({"error": {"message": msg, "type": "gateway_error"}});
     (status, Json(body)).into_response()
@@ -617,10 +623,12 @@ async fn chat_completions(
             streaming: None,
         },
         prefix_hash: hash,
-        estimated_ttft_ms: decision
-            .candidates
-            .get(decision.chosen)
-            .map(|v| v.estimated_ttft_ms),
+        estimated_ttft_ms: chosen_view(&decision).map(|v| v.estimated_ttft_ms),
+        estimated_service_ms: chosen_view(&decision).map(|v| v.estimated_service_ms),
+        conc_bucket: chosen_view(&decision)
+            .map(|v| v.decode_bucket)
+            .unwrap_or("1"),
+        cache_hit: chosen_view(&decision).map(|v| v.reusable_tokens > 0).unwrap_or(false),
         first_token_deadline: st.first_token_timeout.map(|t| Instant::now() + t),
         stream_stall_timeout: st.stream_stall_timeout,
         stream_mode,

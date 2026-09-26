@@ -33,6 +33,17 @@ use std::time::{Duration, Instant};
 /// Cap on JSON body buffering (non-streaming) for usage extraction.
 const MAX_JSON_BUFFER: usize = 256 * 1024;
 
+/// Prompt-length regime for prediction-quality splits (estimated tokens).
+/// The 8K shared-prefix workload and the 1K-class chat workload must land
+/// in different rows of the honesty table.
+fn prompt_bucket_label(est_input_tokens: u64) -> &'static str {
+    match est_input_tokens {
+        0..=1999 => "short",
+        2000..=5999 => "mid",
+        _ => "long",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Timeline
 // ---------------------------------------------------------------------------
@@ -192,6 +203,14 @@ pub struct StreamCtx {
     /// The chosen slot's estimated TTFT at decision time (ms); the other
     /// half of the prediction-error measurement in `finish`.
     pub estimated_ttft_ms: Option<f64>,
+    /// The chosen slot's estimated FULL service time at decision time
+    /// (ms) — prefill + decode as the cost model priced them.
+    pub estimated_service_ms: Option<f64>,
+    /// Regime labels for prediction-quality splits: the concurrency
+    /// bucket the estimate assumed and whether the routing took cache
+    /// reuse. Prompt-length is derived from the token estimate at close.
+    pub conc_bucket: &'static str,
+    pub cache_hit: bool,
     pub first_token_deadline: Option<Instant>,
     /// Mid-stream stall watchdog: abort when no token arrives for this long
     /// after generation started (0/off = None).
@@ -423,6 +442,38 @@ impl<S> InstrumentedStream<S> {
             let error_s = actual.as_secs_f64() - estimated / 1000.0;
             m.scheduler_prediction_error_seconds.observe(error_s);
             m.scheduler_prediction_abs_error_seconds.observe(error_s.abs());
+            // Same measurement split by the regime the model priced for:
+            // prompt length, assumed concurrency bucket, cache hit/miss.
+            let regime = [
+                KeyValue::new("prompt", prompt_bucket_label(tl.est_input_tokens)),
+                KeyValue::new("conc", self.ctx.conc_bucket),
+                KeyValue::new("cache", if self.ctx.cache_hit { "hit" } else { "miss" }),
+            ];
+            m.scheduler_ttft_prediction_error
+                .with_label_values(&[regime[0].value.as_str(), regime[1].value.as_str(), regime[2].value.as_str()])
+                .observe(error_s);
+            m.scheduler_ttft_prediction_abs_error
+                .with_label_values(&[regime[0].value.as_str(), regime[1].value.as_str(), regime[2].value.as_str()])
+                .observe(error_s.abs());
+        }
+        // Service-time honesty (4B.3): the full own-service estimate vs
+        // first-token + decode reality, completed requests only.
+        if matches!(outcome, Outcome::Completed) {
+            if let (Some(est_s), Some(wft), Some(dec)) = (
+                self.ctx.estimated_service_ms,
+                tl.worker_first_token(),
+                tl.decode_phase(),
+            ) {
+                let actual_s = (wft + dec).as_secs_f64();
+                let error_s = actual_s - est_s / 1000.0;
+                let cache = if self.ctx.cache_hit { "hit" } else { "miss" };
+                m.scheduler_service_prediction_error
+                    .with_label_values(&[prompt_bucket_label(tl.est_input_tokens), self.ctx.conc_bucket, cache])
+                    .observe(error_s);
+                m.scheduler_service_prediction_abs_error
+                    .with_label_values(&[prompt_bucket_label(tl.est_input_tokens), self.ctx.conc_bucket, cache])
+                    .observe(error_s.abs());
+            }
         }
         if let Some(reused) = tl.reused_tokens_reported {
             m.scheduler_observed_reused_tokens_total.inc_by(reused);
@@ -741,6 +792,9 @@ mod tests {
             },
             prefix_hash: 0,
             estimated_ttft_ms: None,
+            estimated_service_ms: None,
+            conc_bucket: "1",
+            cache_hit: false,
             first_token_deadline: None,
             stream_stall_timeout: None,
             stream_mode: true,

@@ -146,6 +146,14 @@ pub struct Metrics {
     pub scheduler_prediction_error_seconds: Histogram,
     /// Absolute prediction error: `_sum/_count` = MAE, buckets = p50/p95.
     pub scheduler_prediction_abs_error_seconds: Histogram,
+    // -- prediction quality by regime (phase 4B.3) ----------------------------
+    // Same measurements as above, split by {prompt, conc, cache} — the
+    // regime the model priced for. The unlabeled families stay for 4B.2
+    // comparability.
+    pub scheduler_ttft_prediction_error: HistogramVec,
+    pub scheduler_ttft_prediction_abs_error: HistogramVec,
+    pub scheduler_service_prediction_error: HistogramVec,
+    pub scheduler_service_prediction_abs_error: HistogramVec,
     /// Server-truth reusable tokens observed on completed requests
     /// (llama.cpp `timings.cache_n`) — the realized counterpart of the
     /// router's match estimates.
@@ -507,6 +515,33 @@ impl Metrics {
             "Absolute TTFT prediction error (sum/count = MAE, buckets = p50/p95)",
             latency_buckets(),
         )?;
+        // Phase 4B.3: the SAME measurements, split by the regime the model
+        // priced for — prompt length, the concurrency bucket its estimate
+        // assumed, and whether the routing used cache reuse. Labeled series
+        // make "which load level is the model wrong about?" answerable; the
+        // unlabeled families above stay for 4B.2 comparability.
+        let labeled = |name: &str, help: &str| -> anyhow::Result<HistogramVec> {
+            Ok(HistogramVec::new(
+                HistogramOpts::new(name, help).buckets(latency_buckets()),
+                &["prompt", "conc", "cache"],
+            )?)
+        };
+        let scheduler_ttft_prediction_error = labeled(
+            "scheduler_ttft_prediction_error_seconds",
+            "Signed TTFT prediction error by regime (mean = bias within the regime)",
+        )?;
+        let scheduler_ttft_prediction_abs_error = labeled(
+            "scheduler_ttft_prediction_abs_error_seconds",
+            "Absolute TTFT prediction error by regime (sum/count = MAE)",
+        )?;
+        let scheduler_service_prediction_error = labeled(
+            "scheduler_service_prediction_error_seconds",
+            "Signed service-time (first token + decode) prediction error by regime",
+        )?;
+        let scheduler_service_prediction_abs_error = labeled(
+            "scheduler_service_prediction_abs_error_seconds",
+            "Absolute service-time prediction error by regime (sum/count = MAE)",
+        )?;
         let scheduler_observed_reused_tokens_total = IntCounter::new(
             "scheduler_observed_reused_tokens_total",
             "Server-reported reusable-prefix tokens on completed requests",
@@ -574,6 +609,10 @@ impl Metrics {
         reg!(registry, scheduler_estimated_cache_savings_seconds);
         reg!(registry, scheduler_prediction_error_seconds);
         reg!(registry, scheduler_prediction_abs_error_seconds);
+        reg!(registry, scheduler_ttft_prediction_error);
+        reg!(registry, scheduler_ttft_prediction_abs_error);
+        reg!(registry, scheduler_service_prediction_error);
+        reg!(registry, scheduler_service_prediction_abs_error);
         reg!(registry, scheduler_observed_reused_tokens_total);
         reg!(registry, worker_cache_state);
         reg!(registry, worker_cache_tokens);
@@ -632,6 +671,10 @@ impl Metrics {
             scheduler_estimated_cache_savings_seconds,
             scheduler_prediction_error_seconds,
             scheduler_prediction_abs_error_seconds,
+            scheduler_ttft_prediction_error,
+            scheduler_ttft_prediction_abs_error,
+            scheduler_service_prediction_error,
+            scheduler_service_prediction_abs_error,
             scheduler_observed_reused_tokens_total,
             worker_cache_state,
             worker_cache_tokens,
