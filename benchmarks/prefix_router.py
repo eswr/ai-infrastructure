@@ -96,8 +96,10 @@ PROFILE = {"PROFILE_FIXED_MS": "250", "PROFILE_PREFILL_MS_PER_TOK": "6.2",
            "PROFILE_DECODE_MS_PER_TOK": "25"}
 
 
-def gateway_slot_env(policy: str, model: str, port: int, slots: int) -> dict:
-    return {
+def gateway_slot_env(policy: str, model: str, port: int, slots: int,
+                     cal_dir: str | None = None,
+                     cal_disabled: bool = False) -> dict:
+    env = {
         "GATEWAY_ADDR": "127.0.0.1:8080",
         "WORKERS": f"llama=http://127.0.0.1:{port}#{model}",
         "ROUTE_POLICY": POLICY_ENV[policy],
@@ -117,6 +119,17 @@ def gateway_slot_env(policy: str, model: str, port: int, slots: int) -> dict:
         "FUNCTIONAL_PROBE_INTERVAL_S": "2",
         **PROFILE,
     }
+    # Phase 4B.3: persistent calibration. One dir per study -> legs share
+    # what earlier legs learned (each leg restarts the gateway; the profile
+    # is how the cost model survives the restart). CALIBRATION_DISABLED=1
+    # reproduces the 4B.2 seed-only baseline for A/B.
+    if cal_disabled:
+        env["CALIBRATION_DISABLED"] = "1"
+    elif cal_dir:
+        env["CALIBRATION_DIR"] = cal_dir
+        env["CALIBRATION_MACHINE"] = "apple-m5"
+        env["CALIBRATION_SAVE_INTERVAL_S"] = "2"
+    return env
 
 
 def wait_gateway_all_ready(slots: int, timeout_s: float = 90.0) -> dict:
@@ -290,7 +303,8 @@ def extract_routing_log(gateway_log: Path, dest: Path) -> int:
 
 def run_leg(rt, gateway_bin: Path, loadgen_bin: Path, study_dir: Path,
             policy: str, topo: str, warm_n: int, sampler: MemorySampler,
-            leg_params: dict) -> dict:
+            leg_params: dict, cal_dir: str | None = None,
+            cal_disabled: bool = False) -> dict:
     """One leg: reset -> functional gate -> gateway(policy) -> [warm] ->
     measured run -> post-run health + evidence capture. Returns the record."""
     leg = f"{topo}-{policy}"
@@ -318,7 +332,9 @@ def run_leg(rt, gateway_bin: Path, loadgen_bin: Path, study_dir: Path,
         gw = subprocess.Popen([str(gateway_bin)],
                               stdout=gw_log, stderr=subprocess.STDOUT,
                               env={**os.environ,
-                                   **gateway_slot_env(policy, model, rt.port, leg_params["slots"])},
+                                   **gateway_slot_env(policy, model, rt.port,
+                                                      leg_params["slots"],
+                                                      cal_dir, cal_disabled)},
                               cwd=REPO, start_new_session=True)
         try:
             effective_slots = 0 if policy == "native" else leg_params["slots"]
@@ -382,8 +398,103 @@ def run_leg(rt, gateway_bin: Path, loadgen_bin: Path, study_dir: Path,
     return record
 
 
+def calibration_wave(gateway_bin: Path, loadgen_bin: Path, study_dir: Path,
+                     model: str, rt, sampler: "MemorySampler", cal_dir: str,
+                     rounds: int = 2) -> dict:
+    """Pre-study probe wave that teaches the cost model BEFORE any measured
+    leg: solo short + solo long prefills (the 2-point regression + bucket-1
+    decode), then an 8-way cold burst (loaded-decode and prefill-contention
+    buckets). Every run carries a DISTINCT seed (distinct prefix), so no
+    wave request ever rides a previous wave's cache -- prefills are honestly
+    cold. The gateway persists what it learns; every later leg boots from
+    measurement instead of seeds. This is the 'pre-calibrate probe wave'
+    the 4B.2 analysis called for."""
+    leg_dir = study_dir / "calibration-wave"
+    leg_dir.mkdir(parents=True, exist_ok=True)
+    record = {"leg": "calibration-wave", "rounds": rounds, "runs": []}
+
+    if not rt.reset_cache():
+        record["verdict"] = "restart_failed"
+        return record
+    if not rt.wait_functional(FUNCTIONAL_TIMEOUT_S).ok:
+        record["verdict"] = "not_functional_after_reset"
+        return record
+
+    with (leg_dir / "gateway.log").open("wb") as gw_log:
+        gw = subprocess.Popen(
+            [str(gateway_bin)],
+            stdout=gw_log, stderr=subprocess.STDOUT,
+            env={**os.environ,
+                 **gateway_slot_env("cache_aware_ect", model, rt.port, 8,
+                                    cal_dir=cal_dir)},
+            cwd=REPO, start_new_session=True)
+        try:
+            record["gateway_at_start"] = wait_gateway_all_ready(8)
+            sampler.phase = "calibration-wave"
+            t0 = time.time()
+            # (name, shared_tokens, concurrency, num_requests, seed)
+            plan = []
+            for r in range(rounds):
+                plan += [
+                    ("short-solo", 1024, 1, 1, 900 + r * 10 + 1),
+                    ("long-solo", 8192, 1, 1, 900 + r * 10 + 2),
+                    ("c8-burst", 8192, 8, 8, 900 + r * 10 + 3),
+                ]
+            for name, shared, c, n, seed in plan:
+                toml = leg_dir / ("wave-%s.toml" % name)
+                toml.write_text("""
+study = "calibration-wave"
+description = "4B.3 calibration wave: %s (seed %d)"
+cooldown_s = 1.0
+[defaults]
+endpoint = "http://127.0.0.1:8080"
+model = "%s"
+output_tokens = 64
+stream = true
+arrival = "burst"
+timeout_s = 900
+seed = %d
+shared_prefix_tokens = %d
+
+[[runs]]
+name = "wave-%s"
+input_tokens = %d
+concurrency = %d
+num_requests = %d
+""" % (name, seed, model, seed, shared, name, shared + UNIQUE_TOKENS, c, n))
+                rc = subprocess.run(
+                    [str(loadgen_bin), "--matrix", str(toml),
+                     "--out-dir", str(leg_dir / name)],
+                    cwd=REPO, capture_output=True, text=True)
+                record["runs"].append({"name": name, "seed": seed,
+                                       "exit": rc.returncode})
+                if rc.returncode != 0:
+                    (leg_dir / ("wave-%s.log" % name)).write_text(
+                        rc.stdout[-2000:] + rc.stderr[-2000:])
+            record["wall_s"] = round(time.time() - t0, 1)
+
+            time.sleep(3)  # let the periodic save land
+            status, body = http_get("http://127.0.0.1:8080/status")
+            if status == 200:
+                try:
+                    record["calibration_after"] = json.loads(body).get("calibration")
+                except json.JSONDecodeError:
+                    pass
+            ok = all(r["exit"] == 0 for r in record["runs"])
+            record["verdict"] = "healthy" if ok else "degraded"
+        finally:
+            if gw.poll() is None:
+                os.killpg(gw.pid, 15)
+                try:
+                    gw.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    os.killpg(gw.pid, 9)
+    return record
+
+
 def two_prefix_experiment(rt, gateway_bin: Path, loadgen_bin: Path,
-                          study_dir: Path, sampler: MemorySampler) -> dict:
+                          study_dir: Path, sampler: MemorySampler,
+                          cal_dir: str | None = None) -> dict:
     """Miniature multi-tenant cluster: A and B prefixes warm on slots 0/1,
     then 4 A-requests and 4 B-requests arrive interleaved (two concurrent
     loadgen processes). The router should keep each prefix on its warm
@@ -405,7 +516,8 @@ def two_prefix_experiment(rt, gateway_bin: Path, loadgen_bin: Path,
         gw = subprocess.Popen([str(gateway_bin)],
                               stdout=gw_log, stderr=subprocess.STDOUT,
                               env={**os.environ,
-                                   **gateway_slot_env("cache_aware_ect", model, rt.port, 8)},
+                                   **gateway_slot_env("cache_aware_ect", model, rt.port, 8,
+                                                      cal_dir=cal_dir)},
                               cwd=REPO, start_new_session=True)
         try:
             record["gateway_at_start"] = wait_gateway_all_ready(8)
@@ -495,6 +607,14 @@ def main() -> int:
                     help="append the A/B two-prefix interleaved experiment")
     ap.add_argument("--skip-matrix", action="store_true",
                     help="skip the 16-leg matrix (use with --two-prefix)")
+    ap.add_argument("--cal-dir", type=Path, default=None,
+                    help="persistent calibration dir (default: <study>/calibration)")
+    ap.add_argument("--no-calibration", action="store_true",
+                    help="CALIBRATION_DISABLED=1: seed-only cost model (4B.2 baseline)")
+    ap.add_argument("--calibration-wave", action="store_true",
+                    help="run the pre-study calibration probe wave first")
+    ap.add_argument("--cal-rounds", type=int, default=2,
+                    help="rounds in the calibration wave (default 2)")
     ap.add_argument("--smoke", action="store_true",
                     help="tiny workload (1K prefix, 4 requests, out=32) to "
                          "validate the pipeline; not comparable data")
@@ -526,6 +646,9 @@ def main() -> int:
     study_dir.mkdir(parents=True)
     print(f"study dir: {study_dir}")
 
+    cal_dir = None if args.no_calibration else str(
+        args.cal_dir or (study_dir / "calibration"))
+
     rt = make_runtime(args.runtime)
     legs: list[dict] = []
     sampler = MemorySampler(lambda: rt.proc.pid if rt.proc else None,
@@ -539,6 +662,14 @@ def main() -> int:
         time.sleep(2)
         sampler.phase = "after_load"
 
+        if args.calibration_wave and cal_dir:
+            log("=== calibration wave (pre-study probe runs)")
+            rec = calibration_wave(args.gateway, loadgen_bin, study_dir,
+                                   rt.model, rt, sampler, cal_dir,
+                                   rounds=args.cal_rounds)
+            legs.append(rec)
+            log(f"=== calibration wave: {rec.get('verdict')} (wall={rec.get('wall_s')}s)")
+
         leg_params = {"slots": 8, "c": CONCURRENCY, "n": NUM_REQUESTS, "out": OUTPUT_TOKENS}
         if not args.skip_matrix:
             for topo in topos:
@@ -549,7 +680,8 @@ def main() -> int:
                         leg = f"{topo}-{policy}" + (f"-c{c}" if len(cs) > 1 else "")
                         log(f"=== leg {leg}")
                         rec = run_leg(rt, args.gateway, loadgen_bin, study_dir,
-                                      policy, topo, warm_n, sampler, leg_params)
+                                      policy, topo, warm_n, sampler, leg_params,
+                                      cal_dir, args.no_calibration)
                         if len(cs) > 1:
                             rec["leg"] = leg
                         legs.append(rec)
@@ -559,12 +691,21 @@ def main() -> int:
         if args.two_prefix:
             log("=== two-prefix A/B interleaved experiment")
             rec = two_prefix_experiment(rt, args.gateway, loadgen_bin, study_dir,
-                                        sampler)
+                                        sampler, cal_dir=cal_dir)
             legs.append(rec)
             log(f"=== two-prefix: {rec.get('verdict')}")
     finally:
         rt.stop()
         sampler.stop()
+        # Copy the final calibration profile next to the study record.
+        if cal_dir:
+            cal_root = Path(cal_dir)
+            for prof in sorted(cal_root.glob("*/*/*.json")):
+                try:
+                    (study_dir / "calibration_profile_final.json").write_text(
+                        prof.read_text())
+                except OSError:
+                    pass
         lifecycle = {
             "study": args.study_name,
             "created": ts,
@@ -596,6 +737,12 @@ def main() -> int:
                 "policies learn the topology from these completions"
             ),
             "profile_seeds": PROFILE,
+            "calibration": {
+                "dir": cal_dir,
+                "disabled": args.no_calibration,
+                "wave": args.calibration_wave,
+                "wave_rounds": args.cal_rounds,
+            },
             "legs": legs,
             "memory_peak_rss_mb": round(sampler.peak_rss_mb, 1),
             "memory_peak_footprint_mb": round(sampler.peak_footprint_mb, 1),

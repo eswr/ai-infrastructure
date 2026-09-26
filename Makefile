@@ -82,6 +82,12 @@ experiment-prefix-cache: build-release ## phase-4B: cold vs warm prefix reuse on
 experiment-prefix-router: build-release ## phase-4B.2: load-gated prefix routing, 4 policies x 4 cache topologies (~1.5 h, real GPU)
 	python3 benchmarks/prefix_router.py --runtime llama-cpp --two-prefix
 
+experiment-calibration: build-release ## phase-4B.3: calibrated cost model vs 4B.2 baseline, 8 legs + wave (~1 h, real GPU)
+	python3 benchmarks/prefix_router.py --runtime llama-cpp --policies cache_aware_ect,least_work --topologies all-cold,one-warm,four-warm,all-warm --calibration-wave --study-name calibration-router
+
+experiment-calibration-ab: build-release ## phase-4B.3 A/B: --no-calibration rerun for the same legs (seed-only baseline)
+	python3 benchmarks/prefix_router.py --runtime llama-cpp --policies cache_aware_ect,least_work --topologies all-cold,one-warm,four-warm,all-warm --no-calibration --study-name calibration-router-nocal
+
 # -------------------------------------------------------- observability --
 
 up:              ## start Prometheus/Grafana/Tempo/Loki/OTel-collector
