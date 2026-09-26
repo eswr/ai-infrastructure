@@ -50,6 +50,11 @@ pub struct Scenario {
     pub timeout_s: f64,
     #[serde(default = "default_seed")]
     pub seed: u64,
+    /// Requested service class ("interactive" | "standard" | "batch"),
+    /// serialized onto each request for the gateway's scheduler (phase 4C).
+    /// None serializes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_class: Option<String>,
 }
 
 fn default_timeout() -> f64 {
@@ -99,6 +104,7 @@ impl Scenario {
             include_usage: true,
             id_slot: self.id_slot,
             cache_prompt: self.id_slot.map(|_| true),
+            service_class: self.service_class.clone(),
         }
     }
 }
@@ -213,6 +219,7 @@ mod tests {
             arrival: Arrival::Poisson { mean_interval_s: 0.1 },
             timeout_s: 10.0,
             seed: 7,
+            service_class: None,
         }
     }
 

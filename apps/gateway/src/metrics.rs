@@ -91,6 +91,11 @@ pub struct Metrics {
     /// 0 normal | 1 degraded | 2 overloaded.
     pub load_state: IntGauge,
     pub admission_rejections_total: IntCounterVec,
+    /// Arrivals by requested service class (interactive | standard |
+    /// batch) — the denominator for per-class latency analysis.
+    pub service_class_requests_total: IntCounterVec,
+    /// Queue depth by service class (interactive first in grant order).
+    pub queued_by_class: IntGaugeVec,
     pub stream_cancelled_total: IntCounterVec,
     /// Estimated compute that never ran because a request was cancelled
     /// (queued or mid-stream), in seconds.
@@ -337,6 +342,24 @@ impl Metrics {
             ),
             &["reason"],
         )?;
+        let service_class_requests_total = IntCounterVec::new(
+            Opts::new(
+                "inference_service_class_requests_total",
+                "Arrivals by requested service class",
+            ),
+            &["class"],
+        )?;
+        for class in ["interactive", "standard", "batch"] {
+            service_class_requests_total.with_label_values(&[class]);
+        }
+        let queued_by_class = gauge_vec(
+            "inference_queued_by_class",
+            "Admission queue depth by service class",
+            &["class"],
+        )?;
+        for class in ["interactive", "standard", "batch"] {
+            queued_by_class.with_label_values(&[class]).set(0);
+        }
         let stream_cancelled_total = IntCounterVec::new(
             Opts::new(
                 "inference_stream_cancelled_total",
@@ -640,6 +663,8 @@ impl Metrics {
         reg!(registry, estimated_queue_seconds);
         reg!(registry, load_state);
         reg!(registry, admission_rejections_total);
+        reg!(registry, service_class_requests_total);
+        reg!(registry, queued_by_class);
         reg!(registry, stream_cancelled_total);
         reg!(registry, saved_compute_seconds);
         reg!(registry, cancel_cleanup_seconds);
@@ -710,6 +735,8 @@ impl Metrics {
             estimated_queue_seconds,
             load_state,
             admission_rejections_total,
+            service_class_requests_total,
+            queued_by_class,
             stream_cancelled_total,
             saved_compute_seconds,
             cancel_cleanup_seconds,

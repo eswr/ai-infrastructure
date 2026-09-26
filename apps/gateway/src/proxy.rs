@@ -768,6 +768,7 @@ mod tests {
             input_tokens: 10,
             output_tokens: 10,
             est_work_ms: 100.0,
+            class: inference_lab_scheduler::ServiceClass::Standard,
         }) {
             AdmissionDecision::Admit(p) => p,
             _ => panic!("disabled policy must admit immediately"),

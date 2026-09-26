@@ -73,6 +73,10 @@ struct Cli {
     /// shared prefix (Rust StdRng synthesis).
     #[arg(long)]
     seed: Option<u64>,
+    /// Requested service class (interactive | standard | batch): serialized
+    /// onto every request for the gateway's scheduler (phase 4C).
+    #[arg(long)]
+    service_class: Option<String>,
     /// Streaming on/off; overrides the scenario file when given
     /// (e.g. `--stream false`).
     #[arg(long, value_parser = clap::builder::BoolishValueParser::new())]
@@ -102,6 +106,7 @@ fn baseline_scenario() -> Scenario {
         arrival: Arrival::Burst,
         timeout_s: 300.0,
         seed: 42,
+        service_class: None,
     }
 }
 
@@ -134,6 +139,9 @@ fn build_scenario(cli: &Cli) -> Result<Scenario> {
     }
     if cli.pin_slot.is_some() {
         s.id_slot = cli.pin_slot;
+    }
+    if let Some(v) = &cli.service_class {
+        s.service_class = Some(v.clone());
     }
     if let Some(v) = cli.seed {
         s.seed = v;

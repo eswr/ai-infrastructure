@@ -46,6 +46,12 @@ pub struct ChatCompletionRequest {
     /// so it pins the behavior explicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_prompt: Option<bool>,
+    /// Lab extension (phase 4C): requested service class — `interactive`,
+    /// `standard` or `batch`. The gateway's scheduler consumes it (class
+    /// priority in admission queue grants, class-labeled telemetry);
+    /// ordinary OpenAI servers ignore the unknown field entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_class: Option<String>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -71,6 +77,7 @@ impl ChatCompletionRequest {
             include_usage: false,
             id_slot: None,
             cache_prompt: None,
+            service_class: None,
         }
     }
 }

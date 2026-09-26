@@ -151,6 +151,50 @@ impl RoutingPolicy {
     }
 }
 
+/// Requested service class (phase 4C). Carried by the request, consumed by
+/// the admission queue's grant priority and class-labeled telemetry — the
+/// cheap, testable version of a QoS story: contention *physics* (routing
+/// and the marginal gate) is class-blind, but *who gets the next freed
+/// capacity* is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ServiceClass {
+    /// Chat-shaped: first token is the product. Granted from queues first.
+    Interactive,
+    /// Default when the request says nothing.
+    #[default]
+    Standard,
+    /// Throughput-shaped: tolerates waiting for freed capacity.
+    Batch,
+}
+
+impl ServiceClass {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "interactive" => Some(Self::Interactive),
+            "standard" => Some(Self::Standard),
+            "batch" => Some(Self::Batch),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Interactive => "interactive",
+            Self::Standard => "standard",
+            Self::Batch => "batch",
+        }
+    }
+
+    /// Grant priority in the admission queue (lower grants first).
+    pub fn queue_rank(&self) -> u8 {
+        match self {
+            Self::Interactive => 0,
+            Self::Standard => 1,
+            Self::Batch => 2,
+        }
+    }
+}
+
 /// What the router needs to know about the request being placed.
 #[derive(Debug, Clone, Copy)]
 pub struct RequestShape {
@@ -164,6 +208,12 @@ pub struct RequestShape {
     /// the router models slots. External cache warmers use this to teach
     /// the gateway's slot-cache model from real traffic.
     pub pinned_slot: Option<u32>,
+    /// Requested service class. On this lab's single-server slot
+    /// topologies the routing objective is class-independent by
+    /// construction (decode rate is server-wide, so argmin-TTFT and
+    /// argmin-completion reduce to the same argmin) — the class acts in
+    /// the admission queue's grant priority instead.
+    pub service_class: ServiceClass,
 }
 
 // ---------------------------------------------------------------------------
@@ -1334,6 +1384,7 @@ mod tests {
             input_tokens: in_tok,
             output_tokens: out_tok,
             pinned_slot: None,
+            service_class: ServiceClass::Standard,
         }
     }
 

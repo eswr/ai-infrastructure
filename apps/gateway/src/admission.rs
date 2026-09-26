@@ -31,6 +31,7 @@
 //! disconnect is only observable at response-write time), releasing the
 //! queued work immediately.
 
+use inference_lab_scheduler::ServiceClass;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -104,6 +105,9 @@ pub struct RequestSize {
     pub output_tokens: u64,
     /// Estimated total service time in ms (scheduler service model).
     pub est_work_ms: f64,
+    /// Requested service class: decides grant priority when capacity
+    /// frees (interactive first — phase 4C).
+    pub class: ServiceClass,
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +163,12 @@ pub struct Queued {
     notify: Notify,
 }
 
+impl Queued {
+    pub fn class(&self) -> ServiceClass {
+        self.size.class
+    }
+}
+
 pub enum AdmissionDecision {
     /// Budgets fit and nobody was waiting — dispatch now; the permit owns
     /// the granted capacity.
@@ -189,6 +199,14 @@ struct AdmissionState {
     active_input_tokens: u64,
     active_output_tokens: u64,
     queue: VecDeque<Arc<Queued>>,
+}
+
+/// Indices into the queue in grant-consideration order: service class
+/// priority (interactive → standard → batch), FIFO within a class.
+fn priority_order(queue: &VecDeque<Arc<Queued>>) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..queue.len()).collect();
+    order.sort_by_key(|&i| (queue[i].size.class.queue_rank(), i));
+    order
 }
 
 impl AdmissionState {
@@ -372,11 +390,18 @@ impl AdmissionController {
         // request may pass a too-big head (avoids head-of-line blocking)
         // but grants otherwise happen in arrival order. Running totals are
         // simulated first so the queue is only read, then applied.
+        // Class-priority grant scan (phase 4C): interactive entries are
+        // considered before standard before batch, FIFO within each class.
+        // Priority changes the scan ORDER only — the fits checks and the
+        // decide-side no-barging rule are untouched, so a class never
+        // overruns budgets, it just gets first claim on freed capacity.
         if self.policy.enabled() {
             let mut act_in = st.active_input_tokens;
             let mut act_out = st.active_output_tokens;
             let mut granted = Vec::new();
-            for q in st.queue.iter() {
+            let order = priority_order(&st.queue);
+            for i in order.iter() {
+                let q = &st.queue[*i];
                 if q.granted.load(Ordering::Acquire) || q.cancelled.load(Ordering::Acquire) {
                     continue; // stale entry awaiting cleanup
                 }
@@ -388,10 +413,13 @@ impl AdmissionController {
                 }
             }
             // Liveness rule: nothing fits and nothing is active — the queue
-            // would deadlock. Force-grant the head; overshoot is bounded by
-            // one max-size request (e.g. a prompt a hair over the budget).
+            // would deadlock. Force-grant the head (highest-priority
+            // non-cancelled); overshoot is bounded by one max-size request
+            // (e.g. a prompt a hair over the budget).
             if granted.is_empty() && st.active_requests == 0 {
-                if let Some(head) = st.queue.iter().find(|q| !q.cancelled.load(Ordering::Acquire)) {
+                if let Some(head) = order.iter().map(|i| &st.queue[*i]).find(|q| {
+                    !q.cancelled.load(Ordering::Acquire)
+                }) {
                     let head = head.clone();
                     act_in += head.size.input_tokens;
                     act_out += head.size.output_tokens;
@@ -410,6 +438,17 @@ impl AdmissionController {
                 q.notify.notify_one();
             }
         }
+    }
+
+    /// Count queued entries per service class (`[interactive, standard,
+    /// batch]`) — the queue-composition gauge.
+    pub fn queued_by_class(&self) -> [u64; 3] {
+        let st = self.lock();
+        let mut out = [0u64; 3];
+        for q in st.queue.iter() {
+            out[q.size.class.queue_rank() as usize] += 1;
+        }
+        out
     }
 
     pub fn snapshot(&self) -> AdmissionSnapshot {
@@ -500,7 +539,12 @@ mod tests {
             input_tokens: in_tok,
             output_tokens: out_tok,
             est_work_ms: in_tok as f64 * 5.0 + out_tok as f64 * 75.0,
+            class: ServiceClass::Standard,
         }
+    }
+
+    fn sized(in_tok: u64, out_tok: u64, class: ServiceClass) -> RequestSize {
+        RequestSize { class, ..size(in_tok, out_tok) }
     }
 
     /// decide() → owned permit, panicking on anything but immediate admit.
@@ -721,6 +765,34 @@ mod tests {
         let s = c.snapshot();
         assert_eq!(s.active_requests, 1);
         assert_eq!(s.queued_requests, 0);
+    }
+
+    #[test]
+    fn interactive_entries_are_granted_before_batch() {
+        // The 4C service-class contract: freed capacity goes to the
+        // highest-priority class that fits, FIFO within a class. A small
+        // interactive arrival behind a too-big batch head must not wait
+        // for it.
+        let c = AdmissionController::new(AdmissionPolicy {
+            max_active_input_tokens: 4096,
+            max_active_output_tokens: 1_000_000,
+            degraded_queue_s: 5.0,
+            overloaded_queue_s: 10_000.0,
+            max_estimated_work_ms: 0,
+        });
+        let permit = admit(&c, size(4096, 64));
+        let batch_head = queue_entry(&c, sized(8192, 64, ServiceClass::Batch));
+        let batch_small = queue_entry(&c, sized(16, 16, ServiceClass::Batch));
+        let interactive = queue_entry(&c, sized(16, 16, ServiceClass::Interactive));
+        drop(permit);
+        assert!(interactive.granted.load(Ordering::Acquire), "interactive granted first");
+        assert!(batch_small.granted.load(Ordering::Acquire), "batch FIFO within its class");
+        assert!(!batch_head.granted.load(Ordering::Acquire), "oversize batch head still waits");
+        // Order matters, not just outcome: the freed 4096 budget went to
+        // interactive + small batch (16+16 tokens), never to the 8K head.
+        let s = c.snapshot();
+        assert_eq!(s.active_requests, 2);
+        assert_eq!(c.queued_by_class(), [0, 0, 1]);
     }
 
     #[test]

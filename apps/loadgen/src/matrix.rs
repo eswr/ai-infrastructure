@@ -66,6 +66,9 @@ pub struct RunSpec {
     pub timeout_s: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+    /// Requested service class (interactive | standard | batch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_class: Option<String>,
 }
 
 impl RunSpec {
@@ -108,6 +111,9 @@ impl RunSpec {
         }
         if let Some(v) = self.seed.or(defaults.seed) {
             s.seed = v;
+        }
+        if let Some(v) = self.service_class.as_ref().or(defaults.service_class.as_ref()) {
+            s.service_class = Some(v.clone());
         }
         s.name = self
             .name
@@ -180,6 +186,7 @@ mod tests {
             arrival: Arrival::Burst,
             timeout_s: 300.0,
             seed: 42,
+            service_class: None,
         }
     }
 

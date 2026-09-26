@@ -104,7 +104,7 @@ use inference_lab_protocol::ChatCompletionRequest;
 use inference_lab_scheduler::{
     calibration::{CalibrationKey, CalibrationStore, RuntimeCalibration},
     DispatchTicket, RequestShape, RouteDecision, Router as WorkerRouter, RouterConfig,
-    SelectOutcome, ServiceDefaults, WorkerHandle,
+    SelectOutcome, ServiceClass, ServiceDefaults, WorkerHandle,
 };
 use inference_lab_worker_lifecycle::{Dimension, FailureReason, WorkerState};
 use metrics::Metrics;
@@ -337,6 +337,15 @@ async fn chat_completions(
     let est_in = st.estimator.estimate(&req);
     let out_tok = req.max_tokens as u64;
     let hash = prefix_hash(&req);
+    let service_class = req
+        .service_class
+        .as_deref()
+        .and_then(ServiceClass::parse)
+        .unwrap_or_default();
+    st.metrics
+        .service_class_requests_total
+        .with_label_values(&[service_class.as_str()])
+        .inc();
 
     let root = telemetry::root_span(
         "POST /v1/chat/completions",
@@ -348,6 +357,7 @@ async fn chat_completions(
             KeyValue::new("request.output_tokens_requested", out_tok as i64),
             KeyValue::new("scheduler.policy", st.router.policy().as_str()),
             KeyValue::new("cache.prefix_hash", format!("{hash:016x}")),
+            KeyValue::new("service.class", service_class.as_str()),
         ],
     );
     telemetry::instant_span(
@@ -364,6 +374,7 @@ async fn chat_completions(
         input_tokens: est_in,
         output_tokens: out_tok,
         est_work_ms: est_work_ms(&st, est_in, out_tok),
+        class: service_class,
     };
 
     let admission_span =
@@ -452,6 +463,7 @@ async fn chat_completions(
         input_tokens: est_in,
         output_tokens: out_tok,
         pinned_slot: req.id_slot,
+        service_class,
     };
     let sel_span = telemetry::child_span(&root, "scheduler.select", SpanKind::Internal, vec![]);
     // Contention gate (phase 4C): when the measured curve says one more
@@ -853,6 +865,12 @@ async fn status(State(st): State<Arc<AppState>>) -> Response {
         .map(|c| c.cal.active_prefills())
         .unwrap_or(0);
     let gate_cal = st.calibrations.first().map(|c| &c.cal);
+    let queued_by_class = st.admission.queued_by_class();
+    let queued_by_class_json = serde_json::json!({
+        "interactive": queued_by_class[0],
+        "standard": queued_by_class[1],
+        "batch": queued_by_class[2],
+    });
     Json(serde_json::json!({
         "admission": {
             "enabled": snap.enabled,
@@ -864,6 +882,7 @@ async fn status(State(st): State<Arc<AppState>>) -> Response {
             "queued_output_tokens": snap.queued_output_tokens,
             "estimated_queue_seconds": snap.estimated_queue_seconds,
             "load_state": snap.load_state.as_str(),
+            "queued_by_class": queued_by_class_json,
         },
         "contention_gate": {
             "enabled": st.router.config().contention_gate,
@@ -990,6 +1009,11 @@ async fn gauge_sampler(st: Arc<AppState>) {
         let m = &st.metrics;
         m.requests_active.set(s.active_requests as i64);
         m.requests_queued.set(s.queued_requests as i64);
+        for (i, class) in ["interactive", "standard", "batch"].iter().enumerate() {
+            m.queued_by_class
+                .with_label_values(&[class])
+                .set(st.admission.queued_by_class()[i] as i64);
+        }
         m.queued_input_tokens.set(s.queued_input_tokens as i64);
         m.queued_output_tokens.set(s.queued_output_tokens as i64);
         m.estimated_queue_seconds.set(s.estimated_queue_seconds);
