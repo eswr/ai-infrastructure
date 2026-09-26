@@ -1,0 +1,26 @@
+# Routing-decision log excerpts — phase 4B.2 (tracing 'routing decision' lines, ANSI stripped)
+
+## all-cold / cache-aware-ect — the cold-start gate refusing to join a POPULATING slot
+
+2026-09-25T19:41:02.980839Z  INFO gateway::routing: routing decision policy="cache-aware-ect" worker=llama-slot3 slot=Some(3) reason="prefill_pressure_overrode_affinity" bypass="prefill_pressure" est_ttft_s="51.951800000000006" candidates=0:est_ttft=58.6s,q=58.4s,saved=51.7s,match=8339tok | 1:est_ttft=58.6s,q=58.4s,saved=51.7s,match=8339tok | 2:est_ttft=58.6s,q=58.4s,saved=51.7s,match=8339tok | 3:
+2026-09-25T19:41:02.980842Z  INFO gateway::routing: routing decision policy="cache-aware-ect" worker=llama-slot1 slot=Some(1) reason="prefill_pressure_overrode_affinity" bypass="prefill_pressure" est_ttft_s="51.951800000000006" candidates=0:est_ttft=58.6s,q=58.4s,saved=51.7s,match=8339tok | 1:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 2:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 3:est_ttft
+2026-09-25T19:41:02.980946Z  INFO gateway::routing: routing decision policy="cache-aware-ect" worker=llama-slot7 slot=Some(7) reason="prefill_pressure_overrode_affinity" bypass="prefill_pressure" est_ttft_s="51.951800000000006" candidates=0:est_ttft=58.6s,q=58.4s,saved=51.7s,match=8339tok | 1:est_ttft=58.6s,q=58.4s,saved=51.7s,match=8339tok | 2:est_ttft=58.6s,q=58.4s,saved=51.7s,match=8339tok | 3:
+
+## all-cold / prefix-only — deliberately recreating the hotspot (join POPULATING)
+
+2026-09-25T19:32:42.981042Z  INFO gateway::routing: routing decision policy="prefix-only" worker=llama-slot0 slot=Some(0) reason="prefix_only_affinity" est_ttft_s="58.601766541" candidates=0:est_ttft=58.6s,q=58.4s,saved=51.7s,match=8339tok | 1:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 2:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 3:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 4:est_ttft=
+2026-09-25T19:32:42.981852Z  INFO gateway::routing: routing decision policy="prefix-only" worker=llama-slot0 slot=Some(0) reason="prefix_only_affinity" est_ttft_s="65.249274041" candidates=0:est_ttft=65.2s,q=65.0s,saved=51.7s,match=8339tok | 1:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 2:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 3:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 4:est_ttft=
+2026-09-25T19:32:42.982294Z  INFO gateway::routing: routing decision policy="prefix-only" worker=llama-slot0 slot=Some(0) reason="prefix_only_affinity" est_ttft_s="71.897924416" candidates=0:est_ttft=71.9s,q=71.6s,saved=51.7s,match=8339tok | 1:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 2:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 3:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 4:est_ttft=
+
+## one-warm / cache-aware-ect — pile-on: every join priced under the cold alternative
+
+2026-09-25T20:34:44.384433Z  INFO gateway::routing: routing decision policy="cache-aware-ect" worker=llama-slot0 slot=Some(0) reason="cache_hit_cheapest" est_ttft_s="7.318309950000001" candidates=0:est_ttft=7.3s,q=7.3s,saved=138.1s,match=8339tok | 1:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 2:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 3:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 4:est
+2026-09-25T20:34:44.384434Z  INFO gateway::routing: routing decision policy="cache-aware-ect" worker=llama-slot0 slot=Some(0) reason="cache_hit_cheapest" est_ttft_s="0" candidates=0:est_ttft=0.0s,q=-0.0s,saved=138.1s,match=8339tok | 1:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 2:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 3:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 4:est_ttft=52.0s,q=-
+2026-09-25T20:34:44.384438Z  INFO gateway::routing: routing decision policy="cache-aware-ect" worker=llama-slot0 slot=Some(0) reason="cache_hit_cheapest" est_ttft_s="14.636603150000001" candidates=0:est_ttft=14.6s,q=14.6s,saved=138.1s,match=8339tok | 1:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 2:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 3:est_ttft=52.0s,q=-0.0s,saved=0.0s,match=0tok | 4:
+
+## all-warm / cache-aware-ect — the winning cell: reuse everywhere, moderate concentration
+
+2026-09-25T23:15:14.250346Z  INFO gateway::routing: routing decision policy="cache-aware-ect" worker=llama-slot3 slot=Some(3) reason="client_pinned" est_ttft_s="52.301796583000005" candidates=3:est_ttft=52.3s,q=52.1s,saved=51.7s,match=8339tok
+2026-09-25T23:15:14.254449Z  INFO gateway::routing: routing decision policy="cache-aware-ect" worker=llama-slot0 slot=Some(0) reason="client_pinned" est_ttft_s="52.301797791000006" candidates=0:est_ttft=52.3s,q=52.1s,saved=51.7s,match=8339tok
+2026-09-25T23:15:14.255010Z  INFO gateway::routing: routing decision policy="cache-aware-ect" worker=llama-slot2 slot=Some(2) reason="client_pinned" est_ttft_s="52.301797375" candidates=2:est_ttft=52.3s,q=52.1s,saved=51.7s,match=8339tok
+2026-09-25T23:15:14.257111Z  INFO gateway::routing: routing decision policy="cache-aware-ect" worker=llama-slot1 slot=Some(1) reason="client_pinned" est_ttft_s="52.301798167" candidates=1:est_ttft=52.3s,q=52.1s,saved=51.7s,match=8339tok

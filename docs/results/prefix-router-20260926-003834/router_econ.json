@@ -1,0 +1,905 @@
+{
+  "legs": [
+    {
+      "leg": "all-cold-cache_aware_ect",
+      "topology": "all-cold",
+      "policy": "cache_aware_ect",
+      "ttft_p50_ms": 335547.8336455,
+      "ttft_p95_ms": 553049.57478335,
+      "itl_p50_ms": 429.91387499985285,
+      "itl_p99_ms": 15328.945481220022,
+      "out_tok_s": 2.6437315679224955,
+      "stall_max_ms": 17228.536792,
+      "spread_ms": 123470.48229200009,
+      "ok": 8,
+      "total": 8,
+      "reused_per_req": 0.0,
+      "reused_total": 0,
+      "cache_observed_requests": 8,
+      "prompt_tokens_server": 8384.0,
+      "bypasses": {
+        "prefill_pressure": 7.0
+      },
+      "opportunities": 7.0,
+      "reused_tokens_observed_total": 0.0,
+      "est_ttft": {
+        "count": 8.0,
+        "sum": 415.6144,
+        "mean": 51.9518,
+        "p50": 45.0,
+        "p95": 58.5
+      },
+      "prediction": {
+        "count": 8.0,
+        "sum": 2266.395305123,
+        "mean": 283.299413140375,
+        "p50": 300.0,
+        "p95": 570.0
+      },
+      "bias": 283.299413140375,
+      "decisions_per_slot": {
+        "llama-slot0": 1.0,
+        "llama-slot1": 1.0,
+        "llama-slot2": 1.0,
+        "llama-slot3": 1.0,
+        "llama-slot4": 1.0,
+        "llama-slot5": 1.0,
+        "llama-slot6": 1.0,
+        "llama-slot7": 1.0
+      },
+      "occupancy": {
+        "samples": 545,
+        "busy_pct": {
+          "0": 80.6,
+          "1": 97.2,
+          "2": 97.6,
+          "3": 99.3,
+          "4": 99.4,
+          "5": 99.6,
+          "6": 99.8,
+          "7": 99.8
+        }
+      }
+    },
+    {
+      "leg": "all-cold-least_work",
+      "topology": "all-cold",
+      "policy": "least_work",
+      "ttft_p50_ms": 388769.35554200003,
+      "ttft_p95_ms": 603403.6123204001,
+      "itl_p50_ms": 468.49872949998826,
+      "itl_p99_ms": 15279.9608725,
+      "out_tok_s": 2.7079708194680574,
+      "stall_max_ms": 17324.733999999997,
+      "spread_ms": 14535.664583000122,
+      "ok": 8,
+      "total": 8,
+      "reused_per_req": 0.0,
+      "reused_total": 0,
+      "cache_observed_requests": 8,
+      "prompt_tokens_server": 8384.0,
+      "bypasses": {},
+      "opportunities": 7.0,
+      "reused_tokens_observed_total": 0.0,
+      "est_ttft": {
+        "count": 8.0,
+        "sum": 415.6144,
+        "mean": 51.9518,
+        "p50": 45.0,
+        "p95": 58.5
+      },
+      "prediction": {
+        "count": 8.0,
+        "sum": 2616.21241071,
+        "mean": 327.02655133875,
+        "p50": 300.0,
+        "p95": 570.0
+      },
+      "bias": 327.02655133875,
+      "decisions_per_slot": {
+        "llama-slot0": 1.0,
+        "llama-slot1": 1.0,
+        "llama-slot2": 1.0,
+        "llama-slot3": 1.0,
+        "llama-slot4": 1.0,
+        "llama-slot5": 1.0,
+        "llama-slot6": 1.0,
+        "llama-slot7": 1.0
+      },
+      "occupancy": {
+        "samples": 599,
+        "busy_pct": {
+          "0": 99.0,
+          "1": 97.5,
+          "2": 98.2,
+          "3": 98.3,
+          "4": 98.5,
+          "5": 98.8,
+          "6": 98.8,
+          "7": 98.8
+        }
+      }
+    },
+    {
+      "leg": "all-cold-native",
+      "topology": "all-cold",
+      "policy": "native",
+      "ttft_p50_ms": 237897.57981250001,
+      "ttft_p95_ms": 428997.2652709499,
+      "itl_p50_ms": 468.43566649992135,
+      "itl_p99_ms": 12734.66542623999,
+      "out_tok_s": 3.4044187307273885,
+      "stall_max_ms": 15010.545082999975,
+      "spread_ms": 15076.75470800011,
+      "ok": 8,
+      "total": 8,
+      "reused_per_req": 0.0,
+      "reused_total": 0,
+      "cache_observed_requests": 8,
+      "prompt_tokens_server": 8384.0,
+      "bypasses": {},
+      "opportunities": 0.0,
+      "reused_tokens_observed_total": 0.0,
+      "est_ttft": {},
+      "prediction": {},
+      "bias": null,
+      "decisions_per_slot": {
+        "llama": 8.0
+      },
+      "occupancy": {
+        "samples": 467,
+        "busy_pct": {
+          "0": 97.4,
+          "1": 97.9,
+          "2": 98.3,
+          "3": 98.7,
+          "4": 99.1,
+          "5": 99.6,
+          "6": 99.8,
+          "7": 99.8
+        }
+      }
+    },
+    {
+      "leg": "all-cold-prefix_only",
+      "topology": "all-cold",
+      "policy": "prefix_only",
+      "ttft_p50_ms": 281607.127771,
+      "ttft_p95_ms": 426188.9621479,
+      "itl_p50_ms": 93.02225000000908,
+      "itl_p99_ms": 1846.8962810000419,
+      "out_tok_s": 4.270462708396987,
+      "stall_max_ms": 3374.3171250000305,
+      "spread_ms": 324734.034125,
+      "ok": 8,
+      "total": 8,
+      "reused_per_req": 9377.375,
+      "reused_total": 75019,
+      "cache_observed_requests": 8,
+      "prompt_tokens_server": 8384.0,
+      "bypasses": {},
+      "opportunities": 7.0,
+      "reused_tokens_observed_total": 75019.0,
+      "est_ttft": {
+        "count": 8.0,
+        "sum": 601.7738105340001,
+        "mean": 75.22172631675001,
+        "p50": 80.0,
+        "p95": 116.0
+      },
+      "prediction": {
+        "count": 8.0,
+        "sum": 1665.5079268839997,
+        "mean": 208.18849086049997,
+        "p50": 210.0,
+        "p95": 540.0
+      },
+      "bias": 208.18849086049997,
+      "decisions_per_slot": {
+        "llama-slot0": 8.0
+      },
+      "occupancy": {
+        "samples": 323,
+        "busy_pct": {
+          "0": 99.7
+        }
+      }
+    },
+    {
+      "leg": "all-warm-cache_aware_ect",
+      "topology": "all-warm",
+      "policy": "cache_aware_ect",
+      "ttft_p50_ms": 42447.9951665,
+      "ttft_p95_ms": 182521.98833344987,
+      "itl_p50_ms": 457.5166454999853,
+      "itl_p99_ms": 6040.495964240005,
+      "out_tok_s": 6.421203712624292,
+      "stall_max_ms": 11914.476457999997,
+      "spread_ms": 89752.51695800005,
+      "ok": 8,
+      "total": 8,
+      "reused_per_req": 11195.125,
+      "reused_total": 89561,
+      "cache_observed_requests": 8,
+      "prompt_tokens_server": 8384.0,
+      "bypasses": {},
+      "opportunities": 16.0,
+      "reused_tokens_observed_total": 89561.0,
+      "est_ttft": {
+        "count": 16.0,
+        "sum": 425.73985427319997,
+        "mean": 26.608740892074998,
+        "p50": 10.0,
+        "p95": 57.0
+      },
+      "prediction": {
+        "count": 16.0,
+        "sum": 3365.3965851038006,
+        "mean": 210.33728656898754,
+        "p50": 165.0,
+        "p95": 552.0
+      },
+      "bias": 210.33728656898754,
+      "decisions_per_slot": {
+        "llama-slot0": 2.0,
+        "llama-slot1": 1.0,
+        "llama-slot2": 2.0,
+        "llama-slot3": 2.0,
+        "llama-slot4": 2.0,
+        "llama-slot5": 2.0,
+        "llama-slot6": 2.0,
+        "llama-slot7": 3.0
+      },
+      "occupancy": {
+        "samples": 201,
+        "busy_pct": {
+          "0": 80.1,
+          "1": 10.9,
+          "2": 75.1,
+          "3": 75.6,
+          "4": 75.1,
+          "5": 75.6,
+          "6": 75.6,
+          "7": 98.5
+        }
+      }
+    },
+    {
+      "leg": "all-warm-least_work",
+      "topology": "all-warm",
+      "policy": "least_work",
+      "ttft_p50_ms": 252782.2751665,
+      "ttft_p95_ms": 568363.9226477,
+      "itl_p50_ms": 334.5432500000461,
+      "itl_p99_ms": 9793.286579880023,
+      "out_tok_s": 2.8708288917364992,
+      "stall_max_ms": 13916.607208999922,
+      "spread_ms": 469293.84225,
+      "ok": 8,
+      "total": 8,
+      "reused_per_req": 11195.0,
+      "reused_total": 89560,
+      "cache_observed_requests": 8,
+      "prompt_tokens_server": 8384.0,
+      "bypasses": {},
+      "opportunities": 16.0,
+      "reused_tokens_observed_total": 89560.0,
+      "est_ttft": {
+        "count": 16.0,
+        "sum": 572.3444495432,
+        "mean": 35.77152809645,
+        "p50": 39.0,
+        "p95": 71.99999999999996
+      },
+      "prediction": {
+        "count": 16.0,
+        "sum": 5730.2891308738,
+        "mean": 358.1430706796125,
+        "p50": 270.0,
+        "p95": 600.0
+      },
+      "bias": 356.31260349723755,
+      "decisions_per_slot": {
+        "llama-slot0": 4.0,
+        "llama-slot1": 1.0,
+        "llama-slot2": 1.0,
+        "llama-slot3": 1.0,
+        "llama-slot4": 1.0,
+        "llama-slot5": 1.0,
+        "llama-slot6": 3.0,
+        "llama-slot7": 4.0
+      },
+      "occupancy": {
+        "samples": 361,
+        "busy_pct": {
+          "0": 99.4,
+          "1": 5.8,
+          "2": 3.3,
+          "6": 73.7,
+          "7": 99.4
+        }
+      }
+    },
+    {
+      "leg": "all-warm-native",
+      "topology": "all-warm",
+      "policy": "native",
+      "ttft_p50_ms": 124717.3567285,
+      "ttft_p95_ms": 128681.824408,
+      "itl_p50_ms": 556.912771000003,
+      "itl_p99_ms": 4926.6419482600195,
+      "out_tok_s": 6.332284186284997,
+      "stall_max_ms": 17427.001875,
+      "spread_ms": 6949.692665999988,
+      "ok": 8,
+      "total": 8,
+      "reused_per_req": 9803.625,
+      "reused_total": 78429,
+      "cache_observed_requests": 8,
+      "prompt_tokens_server": 8384.0,
+      "bypasses": {},
+      "opportunities": 0.0,
+      "reused_tokens_observed_total": 78429.0,
+      "est_ttft": {},
+      "prediction": {},
+      "bias": null,
+      "decisions_per_slot": {
+        "llama": 16.0
+      },
+      "occupancy": {
+        "samples": 248,
+        "busy_pct": {
+          "0": 99.2,
+          "1": 98.4,
+          "2": 99.2,
+          "3": 99.2,
+          "4": 99.6,
+          "5": 99.2,
+          "6": 99.6,
+          "7": 99.6
+        }
+      }
+    },
+    {
+      "leg": "all-warm-prefix_only",
+      "topology": "all-warm",
+      "policy": "prefix_only",
+      "ttft_p50_ms": 71951.338458,
+      "ttft_p95_ms": 73004.1512256,
+      "itl_p50_ms": 476.78845899997395,
+      "itl_p99_ms": 8875.67390542,
+      "out_tok_s": 1.4222016384861584,
+      "stall_max_ms": 11483.216125000006,
+      "spread_ms": 6638.552833000023,
+      "ok": 5,
+      "total": 8,
+      "reused_per_req": 11131.0,
+      "reused_total": 55655,
+      "cache_observed_requests": 5,
+      "prompt_tokens_server": 8384.0,
+      "bypasses": {},
+      "opportunities": 16.0,
+      "reused_tokens_observed_total": 55655.0,
+      "est_ttft": {
+        "count": 16.0,
+        "sum": 475.15715536644996,
+        "mean": 29.697322210403122,
+        "p50": 30.0,
+        "p95": 57.0
+      },
+      "prediction": {
+        "count": 13.0,
+        "sum": 4006.8371179719506,
+        "mean": 308.21823984399623,
+        "p50": 255.0,
+        "p95": 600.0
+      },
+      "bias": 308.21823984399623,
+      "decisions_per_slot": {
+        "llama-slot0": 2.0,
+        "llama-slot1": 1.0,
+        "llama-slot2": 1.0,
+        "llama-slot3": 2.0,
+        "llama-slot4": 2.0,
+        "llama-slot5": 2.0,
+        "llama-slot6": 2.0,
+        "llama-slot7": 4.0
+      },
+      "occupancy": {
+        "samples": 558,
+        "busy_pct": {
+          "0": 32.8,
+          "1": 0.9,
+          "2": 0.5,
+          "3": 28.7,
+          "4": 28.7,
+          "5": 28.9,
+          "6": 28.7,
+          "7": 99.8
+        }
+      }
+    },
+    {
+      "leg": "four-warm-cache_aware_ect",
+      "topology": "four-warm",
+      "policy": "cache_aware_ect",
+      "ttft_p50_ms": 219606.66833299998,
+      "ttft_p95_ms": 422039.22088519996,
+      "itl_p50_ms": 284.3891040000017,
+      "itl_p99_ms": 5962.133642510002,
+      "out_tok_s": 4.001611267276405,
+      "stall_max_ms": 14170.410167000024,
+      "spread_ms": 309959.33466600004,
+      "ok": 8,
+      "total": 8,
+      "reused_per_req": 11195.625,
+      "reused_total": 89565,
+      "cache_observed_requests": 8,
+      "prompt_tokens_server": 8384.0,
+      "bypasses": {},
+      "opportunities": 12.0,
+      "reused_tokens_observed_total": 89565.0,
+      "est_ttft": {
+        "count": 12.0,
+        "sum": 359.79566867619997,
+        "mean": 29.98297238968333,
+        "p50": 34.285714285714285,
+        "p95": 57.428571428571416
+      },
+      "prediction": {
+        "count": 12.0,
+        "sum": 2608.0425406558,
+        "mean": 217.33687838798335,
+        "p50": 210.0,
+        "p95": 554.9999999999999
+      },
+      "bias": 215.12213022148333,
+      "decisions_per_slot": {
+        "llama-slot0": 1.0,
+        "llama-slot1": 3.0,
+        "llama-slot2": 3.0,
+        "llama-slot3": 5.0
+      },
+      "occupancy": {
+        "samples": 295,
+        "busy_pct": {
+          "0": 12.9,
+          "1": 70.5,
+          "2": 69.8,
+          "3": 99.7
+        }
+      }
+    },
+    {
+      "leg": "four-warm-least_work",
+      "topology": "four-warm",
+      "policy": "least_work",
+      "ttft_p50_ms": 236395.259104,
+      "ttft_p95_ms": 407829.10237675003,
+      "itl_p50_ms": 309.51939550001407,
+      "itl_p99_ms": 11652.368207509999,
+      "out_tok_s": 3.5619133433562316,
+      "stall_max_ms": 34721.74729099999,
+      "spread_ms": 188132.147666,
+      "ok": 8,
+      "total": 8,
+      "reused_per_req": 11195.625,
+      "reused_total": 89565,
+      "cache_observed_requests": 8,
+      "prompt_tokens_server": 8384.0,
+      "bypasses": {},
+      "opportunities": 12.0,
+      "reused_tokens_observed_total": 89565.0,
+      "est_ttft": {
+        "count": 12.0,
+        "sum": 651.406954251,
+        "mean": 54.28391285425,
+        "p50": 45.0,
+        "p95": 58.5
+      },
+      "prediction": {
+        "count": 12.0,
+        "sum": 2667.3346220799995,
+        "mean": 222.2778851733333,
+        "p50": 300.0,
+        "p95": 570.0
+      },
+      "bias": 222.2778851733333,
+      "decisions_per_slot": {
+        "llama-slot0": 1.0,
+        "llama-slot1": 1.0,
+        "llama-slot2": 1.0,
+        "llama-slot3": 1.0,
+        "llama-slot4": 2.0,
+        "llama-slot5": 2.0,
+        "llama-slot6": 2.0,
+        "llama-slot7": 2.0
+      },
+      "occupancy": {
+        "samples": 255,
+        "busy_pct": {
+          "0": 21.6,
+          "1": 0.4,
+          "2": 9.4,
+          "4": 98.8,
+          "5": 99.2,
+          "6": 98.4,
+          "7": 99.6
+        }
+      }
+    },
+    {
+      "leg": "four-warm-native",
+      "topology": "four-warm",
+      "policy": "native",
+      "ttft_p50_ms": 42585.702124999996,
+      "ttft_p95_ms": 354972.98130615,
+      "itl_p50_ms": 559.8729579999635,
+      "itl_p99_ms": 24077.03990124994,
+      "out_tok_s": 3.4916460216489127,
+      "stall_max_ms": 27212.268458999955,
+      "spread_ms": 18051.826999999816,
+      "ok": 8,
+      "total": 8,
+      "reused_per_req": 7020.875,
+      "reused_total": 56167,
+      "cache_observed_requests": 8,
+      "prompt_tokens_server": 8384.0,
+      "bypasses": {},
+      "opportunities": 0.0,
+      "reused_tokens_observed_total": 56167.0,
+      "est_ttft": {},
+      "prediction": {},
+      "bias": null,
+      "decisions_per_slot": {
+        "llama": 12.0
+      },
+      "occupancy": {
+        "samples": 390,
+        "busy_pct": {
+          "0": 98.5,
+          "1": 98.2,
+          "2": 98.2,
+          "3": 98.2,
+          "4": 98.7,
+          "5": 97.7,
+          "6": 99.2,
+          "7": 99.5
+        }
+      }
+    },
+    {
+      "leg": "four-warm-prefix_only",
+      "topology": "four-warm",
+      "policy": "prefix_only",
+      "ttft_p50_ms": 222225.80550000002,
+      "ttft_p95_ms": 419457.0047874998,
+      "itl_p50_ms": 343.8658329999889,
+      "itl_p99_ms": 8323.13110999999,
+      "out_tok_s": 3.0498775344503324,
+      "stall_max_ms": 19158.472707999987,
+      "spread_ms": 385850.23508300004,
+      "ok": 7,
+      "total": 8,
+      "reused_per_req": 11132.42857142857,
+      "reused_total": 77927,
+      "cache_observed_requests": 7,
+      "prompt_tokens_server": 8384.0,
+      "bypasses": {},
+      "opportunities": 12.0,
+      "reused_tokens_observed_total": 77927.0,
+      "est_ttft": {
+        "count": 12.0,
+        "sum": 346.5065689644,
+        "mean": 28.8755474137,
+        "p50": 34.285714285714285,
+        "p95": 57.428571428571416
+      },
+      "prediction": {
+        "count": 11.0,
+        "sum": 2225.1136507836,
+        "mean": 202.28305916214546,
+        "p50": 187.5,
+        "p95": 545.0
+      },
+      "bias": 202.28305916214546,
+      "decisions_per_slot": {
+        "llama-slot0": 3.0,
+        "llama-slot1": 1.0,
+        "llama-slot2": 3.0,
+        "llama-slot3": 5.0
+      },
+      "occupancy": {
+        "samples": 316,
+        "busy_pct": {
+          "0": 86.1,
+          "1": 6.6,
+          "2": 82.3,
+          "3": 99.7
+        }
+      }
+    },
+    {
+      "leg": "one-warm-cache_aware_ect",
+      "topology": "one-warm",
+      "policy": "cache_aware_ect",
+      "ttft_p50_ms": 410397.27139550005,
+      "ttft_p95_ms": 696843.1639398,
+      "itl_p50_ms": 110.39864649996161,
+      "itl_p99_ms": 5310.7680050099425,
+      "out_tok_s": 2.5438497541446767,
+      "stall_max_ms": 19042.634541000007,
+      "spread_ms": 685909.970541,
+      "ok": 8,
+      "total": 8,
+      "reused_per_req": 10252.125,
+      "reused_total": 82017,
+      "cache_observed_requests": 8,
+      "prompt_tokens_server": 8384.0,
+      "bypasses": {},
+      "opportunities": 9.0,
+      "reused_tokens_observed_total": 82017.0,
+      "est_ttft": {
+        "count": 9.0,
+        "sum": 257.21202802000005,
+        "mean": 28.57911422444445,
+        "p50": 26.666666666666668,
+        "p95": 56.62499999999999
+      },
+      "prediction": {
+        "count": 9.0,
+        "sum": 3036.727036813,
+        "mean": 337.4141152014444,
+        "p50": 337.5,
+        "p95": 600.0
+      },
+      "bias": 337.4141152014444,
+      "decisions_per_slot": {
+        "llama-slot0": 9.0
+      },
+      "occupancy": {
+        "samples": 387,
+        "busy_pct": {
+          "0": 99.7,
+          "1": 2.1
+        }
+      }
+    },
+    {
+      "leg": "one-warm-least_work",
+      "topology": "one-warm",
+      "policy": "least_work",
+      "ttft_p50_ms": 299509.7725,
+      "ttft_p95_ms": 519235.7242585499,
+      "itl_p50_ms": 559.5987295000232,
+      "itl_p99_ms": 18495.535418000054,
+      "out_tok_s": 2.5837979312096064,
+      "stall_max_ms": 24354.322209000005,
+      "spread_ms": 117113.84354200005,
+      "ok": 8,
+      "total": 8,
+      "reused_per_req": 2782.75,
+      "reused_total": 22262,
+      "cache_observed_requests": 8,
+      "prompt_tokens_server": 8384.0,
+      "bypasses": {},
+      "opportunities": 9.0,
+      "reused_tokens_observed_total": 22262.0,
+      "est_ttft": {
+        "count": 9.0,
+        "sum": 415.964397875,
+        "mean": 46.21826643055555,
+        "p50": 43.125,
+        "p95": 58.3125
+      },
+      "prediction": {
+        "count": 9.0,
+        "sum": 1987.0181389570002,
+        "mean": 220.77979321744448,
+        "p50": 210.0,
+        "p95": 554.9999999999999
+      },
+      "bias": 220.77979321744448,
+      "decisions_per_slot": {
+        "llama-slot0": 2.0,
+        "llama-slot1": 1.0,
+        "llama-slot2": 1.0,
+        "llama-slot3": 1.0,
+        "llama-slot4": 1.0,
+        "llama-slot5": 1.0,
+        "llama-slot6": 1.0,
+        "llama-slot7": 1.0
+      },
+      "occupancy": {
+        "samples": 552,
+        "busy_pct": {
+          "0": 86.6,
+          "1": 98.9,
+          "2": 98.7,
+          "3": 99.1,
+          "4": 99.5,
+          "5": 99.3,
+          "6": 99.6,
+          "7": 99.8
+        }
+      }
+    },
+    {
+      "leg": "one-warm-native",
+      "topology": "one-warm",
+      "policy": "native",
+      "ttft_p50_ms": 285254.071625,
+      "ttft_p95_ms": 496607.10796259996,
+      "itl_p50_ms": 553.1557500000345,
+      "itl_p99_ms": 14221.383076879973,
+      "out_tok_s": 2.954142420244646,
+      "stall_max_ms": 15088.878249999994,
+      "spread_ms": 22115.1873339999,
+      "ok": 8,
+      "total": 8,
+      "reused_per_req": 1455.375,
+      "reused_total": 11643,
+      "cache_observed_requests": 8,
+      "prompt_tokens_server": 8384.0,
+      "bypasses": {},
+      "opportunities": 0.0,
+      "reused_tokens_observed_total": 11643.0,
+      "est_ttft": {},
+      "prediction": {},
+      "bias": null,
+      "decisions_per_slot": {
+        "llama": 9.0
+      },
+      "occupancy": {
+        "samples": 607,
+        "busy_pct": {
+          "0": 97.0,
+          "1": 97.9,
+          "2": 98.5,
+          "3": 98.7,
+          "4": 99.0,
+          "5": 99.3,
+          "6": 99.5,
+          "7": 99.7
+        }
+      }
+    },
+    {
+      "leg": "one-warm-prefix_only",
+      "topology": "one-warm",
+      "policy": "prefix_only",
+      "ttft_p50_ms": 231603.62558300002,
+      "ttft_p95_ms": 440100.3756125,
+      "itl_p50_ms": 101.46604199999274,
+      "itl_p99_ms": 2652.584395490002,
+      "out_tok_s": 3.904628582254859,
+      "stall_max_ms": 8028.291916999966,
+      "spread_ms": 417655.99187399994,
+      "ok": 8,
+      "total": 8,
+      "reused_per_req": 10766.25,
+      "reused_total": 86130,
+      "cache_observed_requests": 8,
+      "prompt_tokens_server": 8384.0,
+      "bypasses": {},
+      "opportunities": 8.0,
+      "reused_tokens_observed_total": 86130.0,
+      "est_ttft": {
+        "count": 9.0,
+        "sum": 654.072715088,
+        "mean": 72.67474612088888,
+        "p50": 75.0,
+        "p95": 115.49999999999999
+      },
+      "prediction": {
+        "count": 9.0,
+        "sum": 1564.4354362459999,
+        "mean": 173.82615958288886,
+        "p50": 142.5,
+        "p95": 464.99999999999966
+      },
+      "bias": 164.5325390273333,
+      "decisions_per_slot": {
+        "llama-slot0": 1.0,
+        "llama-slot1": 8.0
+      },
+      "occupancy": {
+        "samples": 329,
+        "busy_pct": {
+          "0": 8.8,
+          "1": 99.4
+        }
+      }
+    },
+    {
+      "leg": "two-prefix",
+      "topology": "two-prefix",
+      "policy": "",
+      "ttft_p50_ms": 251547.009042,
+      "ttft_p95_ms": 388268.56230635,
+      "itl_p50_ms": 263.1704585000116,
+      "itl_p99_ms": 9148.972527920054,
+      "out_tok_s": 2.1892266511370684,
+      "stall_max_ms": 22430.97995799998,
+      "spread_ms": 72800.99208300002,
+      "ok": 4,
+      "total": 4,
+      "reused_per_req": 4839.75,
+      "reused_total": 19359,
+      "cache_observed_requests": 4,
+      "prompt_tokens_server": 8384.0,
+      "bypasses": {
+        "prefill_pressure": 2.0
+      },
+      "opportunities": 8.0,
+      "reused_tokens_observed_total": 64168.0,
+      "est_ttft": {
+        "count": 10.0,
+        "sum": 332.4203128868,
+        "mean": 33.242031288679996,
+        "p50": 38.57142857142857,
+        "p95": 57.85714285714286
+      },
+      "prediction": {
+        "count": 10.0,
+        "sum": 2652.8386833622,
+        "mean": 265.28386833622,
+        "p50": 255.0,
+        "p95": 562.5
+      },
+      "bias": 265.28386833622,
+      "decisions_per_slot": {
+        "llama-slot0": 3.0,
+        "llama-slot1": 5.0,
+        "llama-slot2": 1.0,
+        "llama-slot3": 1.0
+      },
+      "occupancy": null
+    }
+  ],
+  "two_prefix": {
+    "leg": "two-prefix",
+    "topology": "two-prefix",
+    "policy": "",
+    "ttft_p50_ms": 251547.009042,
+    "ttft_p95_ms": 388268.56230635,
+    "itl_p50_ms": 263.1704585000116,
+    "itl_p99_ms": 9148.972527920054,
+    "out_tok_s": 2.1892266511370684,
+    "stall_max_ms": 22430.97995799998,
+    "spread_ms": 72800.99208300002,
+    "ok": 4,
+    "total": 4,
+    "reused_per_req": 4839.75,
+    "reused_total": 19359,
+    "cache_observed_requests": 4,
+    "prompt_tokens_server": 8384.0,
+    "bypasses": {
+      "prefill_pressure": 2.0
+    },
+    "opportunities": 8.0,
+    "reused_tokens_observed_total": 64168.0,
+    "est_ttft": {
+      "count": 10.0,
+      "sum": 332.4203128868,
+      "mean": 33.242031288679996,
+      "p50": 38.57142857142857,
+      "p95": 57.85714285714286
+    },
+    "prediction": {
+      "count": 10.0,
+      "sum": 2652.8386833622,
+      "mean": 265.28386833622,
+      "p50": 255.0,
+      "p95": 562.5
+    },
+    "bias": 265.28386833622,
+    "decisions_per_slot": {
+      "llama-slot0": 3.0,
+      "llama-slot1": 5.0,
+      "llama-slot2": 1.0,
+      "llama-slot3": 1.0
+    },
+    "occupancy": null
+  }
+}

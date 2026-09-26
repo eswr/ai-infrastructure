@@ -1,0 +1,1301 @@
+{
+  "study": "prefix-router",
+  "created": "20260926-003834",
+  "runtime": "llama-cpp",
+  "model": "Qwen3.5-9B-Q4_K_M.gguf",
+  "question": "phase-4B showed llama.cpp's native LCP slot selection makes cache locality absolute and cold same-prefix bursts serialize (253 s vs 19 s TTFT p50). Which routing policy reuses cache when it pays and spreads when it does not?",
+  "workload": {
+    "shared_prefix_tokens": 8192,
+    "unique_suffix_tokens": 128,
+    "output_tokens": 256,
+    "num_requests": 8,
+    "concurrency": 8,
+    "seed": 42,
+    "stream": true,
+    "arrival": "burst",
+    "via_gateway": true
+  },
+  "policies": [
+    "native",
+    "least_work",
+    "prefix_only",
+    "cache_aware_ect"
+  ],
+  "topologies": {
+    "all-cold": 0,
+    "one-warm": 1,
+    "four-warm": 4,
+    "all-warm": 8
+  },
+  "cache_reset_method": "process_restart",
+  "cache_warm_method": "parallel pinned loadgen one-shots THROUGH the gateway (--pin-slot i, same seed -> byte-identical shared prefix); slot policies learn the topology from these completions",
+  "profile_seeds": {
+    "PROFILE_FIXED_MS": "250",
+    "PROFILE_PREFILL_MS_PER_TOK": "6.2",
+    "PROFILE_DECODE_MS_PER_TOK": "25"
+  },
+  "legs": [
+    {
+      "leg": "all-cold-native",
+      "policy": "native",
+      "topology": "all-cold",
+      "warm_slots": 0,
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "ready": true,
+        "workers": [
+          {
+            "id": "llama",
+            "slot": null,
+            "state": "ready"
+          }
+        ]
+      },
+      "run_exit": 0,
+      "run_wall_s": 601.6,
+      "routing_decision_lines": 8,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 34195.98913192749
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "all-cold-least_work",
+      "policy": "least_work",
+      "topology": "all-cold",
+      "warm_slots": 0,
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "ready": true,
+        "workers": [
+          {
+            "id": "llama-slot0",
+            "slot": 0,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot1",
+            "slot": 1,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot2",
+            "slot": 2,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot3",
+            "slot": 3,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot4",
+            "slot": 4,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot5",
+            "slot": 5,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot6",
+            "slot": 6,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot7",
+            "slot": 7,
+            "state": "ready"
+          }
+        ]
+      },
+      "run_exit": 0,
+      "run_wall_s": 756.3,
+      "routing_decision_lines": 8,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 8995.389938354492
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "all-cold-prefix_only",
+      "policy": "prefix_only",
+      "topology": "all-cold",
+      "warm_slots": 0,
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "ready": true,
+        "workers": [
+          {
+            "id": "llama-slot0",
+            "slot": 0,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot1",
+            "slot": 1,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot2",
+            "slot": 2,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot3",
+            "slot": 3,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot4",
+            "slot": 4,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot5",
+            "slot": 5,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot6",
+            "slot": 6,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot7",
+            "slot": 7,
+            "state": "ready"
+          }
+        ]
+      },
+      "run_exit": 0,
+      "run_wall_s": 479.7,
+      "routing_decision_lines": 8,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 1444.4491863250732
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "all-cold-cache_aware_ect",
+      "policy": "cache_aware_ect",
+      "topology": "all-cold",
+      "warm_slots": 0,
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "ready": true,
+        "workers": [
+          {
+            "id": "llama-slot0",
+            "slot": 0,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot1",
+            "slot": 1,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot2",
+            "slot": 2,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot3",
+            "slot": 3,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot4",
+            "slot": 4,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot5",
+            "slot": 5,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot6",
+            "slot": 6,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot7",
+            "slot": 7,
+            "state": "ready"
+          }
+        ]
+      },
+      "run_exit": 0,
+      "run_wall_s": 692.6,
+      "routing_decision_lines": 8,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 10857.628345489502
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "one-warm-native",
+      "policy": "native",
+      "topology": "one-warm",
+      "warm_slots": 1,
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "ready": true,
+        "workers": [
+          {
+            "id": "llama",
+            "slot": null,
+            "state": "ready"
+          }
+        ]
+      },
+      "warm": {
+        "requested": 1,
+        "ok": true,
+        "wall_s": 68.6,
+        "results": [
+          {
+            "slot": 0,
+            "exit": 0,
+            "err": null
+          }
+        ]
+      },
+      "run_exit": 0,
+      "run_wall_s": 693.3,
+      "routing_decision_lines": 9,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 12886.452913284302
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "one-warm-least_work",
+      "policy": "least_work",
+      "topology": "one-warm",
+      "warm_slots": 1,
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "ready": true,
+        "workers": [
+          {
+            "id": "llama-slot0",
+            "slot": 0,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot1",
+            "slot": 1,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot2",
+            "slot": 2,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot3",
+            "slot": 3,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot4",
+            "slot": 4,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot5",
+            "slot": 5,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot6",
+            "slot": 6,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot7",
+            "slot": 7,
+            "state": "ready"
+          }
+        ]
+      },
+      "warm": {
+        "requested": 1,
+        "ok": true,
+        "wall_s": 83.4,
+        "results": [
+          {
+            "slot": 0,
+            "exit": 0,
+            "err": null
+          }
+        ]
+      },
+      "run_exit": 0,
+      "run_wall_s": 750.1,
+      "routing_decision_lines": 9,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 7716.702938079834
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "one-warm-prefix_only",
+      "policy": "prefix_only",
+      "topology": "one-warm",
+      "warm_slots": 1,
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "ready": true,
+        "workers": [
+          {
+            "id": "llama-slot0",
+            "slot": 0,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot1",
+            "slot": 1,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot2",
+            "slot": 2,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot3",
+            "slot": 3,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot4",
+            "slot": 4,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot5",
+            "slot": 5,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot6",
+            "slot": 6,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot7",
+            "slot": 7,
+            "state": "ready"
+          }
+        ]
+      },
+      "warm": {
+        "requested": 1,
+        "ok": true,
+        "wall_s": 175.1,
+        "results": [
+          {
+            "slot": 0,
+            "exit": 0,
+            "err": null
+          }
+        ]
+      },
+      "run_exit": 0,
+      "run_wall_s": 524.6,
+      "routing_decision_lines": 9,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 703.7498950958252
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "one-warm-cache_aware_ect",
+      "policy": "cache_aware_ect",
+      "topology": "one-warm",
+      "warm_slots": 1,
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "ready": true,
+        "workers": [
+          {
+            "id": "llama-slot0",
+            "slot": 0,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot1",
+            "slot": 1,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot2",
+            "slot": 2,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot3",
+            "slot": 3,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot4",
+            "slot": 4,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot5",
+            "slot": 5,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot6",
+            "slot": 6,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot7",
+            "slot": 7,
+            "state": "ready"
+          }
+        ]
+      },
+      "warm": {
+        "requested": 1,
+        "ok": true,
+        "wall_s": 138.8,
+        "results": [
+          {
+            "slot": 0,
+            "exit": 0,
+            "err": null
+          }
+        ]
+      },
+      "run_exit": 0,
+      "run_wall_s": 805.2,
+      "routing_decision_lines": 9,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 7593.868017196655
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "four-warm-native",
+      "policy": "native",
+      "topology": "four-warm",
+      "warm_slots": 4,
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "ready": true,
+        "workers": [
+          {
+            "id": "llama",
+            "slot": null,
+            "state": "ready"
+          }
+        ]
+      },
+      "warm": {
+        "requested": 4,
+        "ok": true,
+        "wall_s": 424.8,
+        "results": [
+          {
+            "slot": 0,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 1,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 2,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 3,
+            "exit": 0,
+            "err": null
+          }
+        ]
+      },
+      "run_exit": 0,
+      "run_wall_s": 586.6,
+      "routing_decision_lines": 12,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 13715.053081512451
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "four-warm-least_work",
+      "policy": "least_work",
+      "topology": "four-warm",
+      "warm_slots": 4,
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "ready": true,
+        "workers": [
+          {
+            "id": "llama-slot0",
+            "slot": 0,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot1",
+            "slot": 1,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot2",
+            "slot": 2,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot3",
+            "slot": 3,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot4",
+            "slot": 4,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot5",
+            "slot": 5,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot6",
+            "slot": 6,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot7",
+            "slot": 7,
+            "state": "ready"
+          }
+        ]
+      },
+      "warm": {
+        "requested": 4,
+        "ok": true,
+        "wall_s": 509.1,
+        "results": [
+          {
+            "slot": 0,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 1,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 2,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 3,
+            "exit": 0,
+            "err": null
+          }
+        ]
+      },
+      "run_exit": 0,
+      "run_wall_s": 575.1,
+      "routing_decision_lines": 12,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 11531.116008758545
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "four-warm-prefix_only",
+      "policy": "prefix_only",
+      "topology": "four-warm",
+      "warm_slots": 4,
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "ready": true,
+        "workers": [
+          {
+            "id": "llama-slot0",
+            "slot": 0,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot1",
+            "slot": 1,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot2",
+            "slot": 2,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot3",
+            "slot": 3,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot4",
+            "slot": 4,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot5",
+            "slot": 5,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot6",
+            "slot": 6,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot7",
+            "slot": 7,
+            "state": "ready"
+          }
+        ]
+      },
+      "warm": {
+        "requested": 4,
+        "ok": true,
+        "wall_s": 466.5,
+        "results": [
+          {
+            "slot": 0,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 1,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 2,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 3,
+            "exit": 0,
+            "err": null
+          }
+        ]
+      },
+      "run_exit": 0,
+      "run_wall_s": 587.8,
+      "routing_decision_lines": 12,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 3566.373825073242
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "four-warm-cache_aware_ect",
+      "policy": "cache_aware_ect",
+      "topology": "four-warm",
+      "warm_slots": 4,
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "ready": true,
+        "workers": [
+          {
+            "id": "llama-slot0",
+            "slot": 0,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot1",
+            "slot": 1,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot2",
+            "slot": 2,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot3",
+            "slot": 3,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot4",
+            "slot": 4,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot5",
+            "slot": 5,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot6",
+            "slot": 6,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot7",
+            "slot": 7,
+            "state": "ready"
+          }
+        ]
+      },
+      "warm": {
+        "requested": 4,
+        "ok": true,
+        "wall_s": 509.2,
+        "results": [
+          {
+            "slot": 0,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 1,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 2,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 3,
+            "exit": 0,
+            "err": null
+          }
+        ]
+      },
+      "run_exit": 0,
+      "run_wall_s": 511.9,
+      "routing_decision_lines": 12,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 4285.544872283936
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "all-warm-native",
+      "policy": "native",
+      "topology": "all-warm",
+      "warm_slots": 8,
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "ready": true,
+        "workers": [
+          {
+            "id": "llama",
+            "slot": null,
+            "state": "ready"
+          }
+        ]
+      },
+      "warm": {
+        "requested": 8,
+        "ok": true,
+        "wall_s": 754.0,
+        "results": [
+          {
+            "slot": 0,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 1,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 2,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 3,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 4,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 5,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 6,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 7,
+            "exit": 0,
+            "err": null
+          }
+        ]
+      },
+      "run_exit": 0,
+      "run_wall_s": 323.5,
+      "routing_decision_lines": 16,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 22790.055990219116
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "all-warm-least_work",
+      "policy": "least_work",
+      "topology": "all-warm",
+      "warm_slots": 8,
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "ready": true,
+        "workers": [
+          {
+            "id": "llama-slot0",
+            "slot": 0,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot1",
+            "slot": 1,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot2",
+            "slot": 2,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot3",
+            "slot": 3,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot4",
+            "slot": 4,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot5",
+            "slot": 5,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot6",
+            "slot": 6,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot7",
+            "slot": 7,
+            "state": "ready"
+          }
+        ]
+      },
+      "warm": {
+        "requested": 8,
+        "ok": true,
+        "wall_s": 866.5,
+        "results": [
+          {
+            "slot": 0,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 1,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 2,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 3,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 4,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 5,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 6,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 7,
+            "exit": 0,
+            "err": null
+          }
+        ]
+      },
+      "run_exit": 0,
+      "run_wall_s": 713.4,
+      "routing_decision_lines": 16,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 2776.8478393554688
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "all-warm-prefix_only",
+      "policy": "prefix_only",
+      "topology": "all-warm",
+      "warm_slots": 8,
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "ready": true,
+        "workers": [
+          {
+            "id": "llama-slot0",
+            "slot": 0,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot1",
+            "slot": 1,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot2",
+            "slot": 2,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot3",
+            "slot": 3,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot4",
+            "slot": 4,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot5",
+            "slot": 5,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot6",
+            "slot": 6,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot7",
+            "slot": 7,
+            "state": "ready"
+          }
+        ]
+      },
+      "warm": {
+        "requested": 8,
+        "ok": true,
+        "wall_s": 807.9,
+        "results": [
+          {
+            "slot": 0,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 1,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 2,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 3,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 4,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 5,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 6,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 7,
+            "exit": 0,
+            "err": null
+          }
+        ]
+      },
+      "run_exit": 0,
+      "run_wall_s": 900.1,
+      "routing_decision_lines": 16,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 2878.7801265716553
+      },
+      "verdict": "healthy"
+    },
+    {
+      "leg": "all-warm-cache_aware_ect",
+      "policy": "cache_aware_ect",
+      "topology": "all-warm",
+      "warm_slots": 8,
+      "post_reset_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null
+      },
+      "gateway_at_start": {
+        "ready": true,
+        "workers": [
+          {
+            "id": "llama-slot0",
+            "slot": 0,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot1",
+            "slot": 1,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot2",
+            "slot": 2,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot3",
+            "slot": 3,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot4",
+            "slot": 4,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot5",
+            "slot": 5,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot6",
+            "slot": 6,
+            "state": "ready"
+          },
+          {
+            "id": "llama-slot7",
+            "slot": 7,
+            "state": "ready"
+          }
+        ]
+      },
+      "warm": {
+        "requested": 8,
+        "ok": true,
+        "wall_s": 639.5,
+        "results": [
+          {
+            "slot": 0,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 1,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 2,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 3,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 4,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 5,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 6,
+            "exit": 0,
+            "err": null
+          },
+          {
+            "slot": 7,
+            "exit": 0,
+            "err": null
+          }
+        ]
+      },
+      "run_exit": 0,
+      "run_wall_s": 319.1,
+      "routing_decision_lines": 16,
+      "post_run_probe": {
+        "ok": true,
+        "tokens": 6,
+        "error": null,
+        "total_ms": 5759.7551345825195
+      },
+      "verdict": "healthy"
+    }
+  ],
+  "memory_peak_rss_mb": 10186.0,
+  "memory_peak_footprint_mb": 11264.0
+}
