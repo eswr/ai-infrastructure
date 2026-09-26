@@ -1,7 +1,9 @@
 {
   "uid": "inference-lab-serving",
-  "title": "Inference Lab — Serving",
-  "tags": ["inference-lab"],
+  "title": "Inference Lab \u2014 Serving",
+  "tags": [
+    "inference-lab"
+  ],
   "timezone": "browser",
   "refresh": "10s",
   "schemaVersion": 39,
@@ -11,28 +13,58 @@
       "id": 1,
       "type": "timeseries",
       "title": "Gateway requests/s",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": null },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": null
+      },
       "targets": [
-        { "expr": "rate(gateway_requests_total[1m])", "legendFormat": "req/s" }
+        {
+          "expr": "rate(gateway_requests_total[1m])",
+          "legendFormat": "req/s"
+        }
       ]
     },
     {
       "id": 2,
       "type": "timeseries",
       "title": "Active requests (gateway)",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": null },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": null
+      },
       "targets": [
-        { "expr": "gateway_active_requests", "legendFormat": "in-flight" }
+        {
+          "expr": "gateway_active_requests",
+          "legendFormat": "in-flight"
+        }
       ]
     },
     {
       "id": 3,
       "type": "timeseries",
       "title": "Upstream failures/s by worker",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": null },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": null
+      },
       "targets": [
         {
           "expr": "sum by (worker, reason) (rate(gateway_upstream_failures_total[1m]))",
@@ -44,10 +76,237 @@
       "id": 4,
       "type": "timeseries",
       "title": "Scrape targets up",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": null },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": null
+      },
       "targets": [
-        { "expr": "up", "legendFormat": "{{job}}" }
+        {
+          "expr": "up",
+          "legendFormat": "{{job}}"
+        }
+      ]
+    },
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Accelerator contention (phase 4C)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "panels": [],
+      "datasource": {
+        "type": "prometheus",
+        "uid": null
+      }
+    },
+    {
+      "id": 101,
+      "type": "timeseries",
+      "title": "Active prefills / decodes (server-wide)",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": null
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "inference_active_prefills",
+          "legendFormat": "active prefills",
+          "refId": "A"
+        },
+        {
+          "expr": "inference_active_decodes",
+          "legendFormat": "active decodes",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 102,
+      "type": "timeseries",
+      "title": "Contention gate: holds, spills, hold time",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": null
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "scheduler_contention_gate_holds_total",
+          "legendFormat": "holds",
+          "refId": "A"
+        },
+        {
+          "expr": "scheduler_contention_gate_spills_total",
+          "legendFormat": "spills",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(increase(scheduler_contention_gate_hold_seconds_sum[30s]))",
+          "legendFormat": "held seconds/s",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 103,
+      "type": "timeseries",
+      "title": "Prefill contention curve (multiplier + aggregate factor)",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": null
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "scheduler_prefill_contention_multiplier{bucket=~\"2|3-4|5-8\"}",
+          "legendFormat": "multiplier {{bucket}}",
+          "refId": "A"
+        },
+        {
+          "expr": "scheduler_prefill_aggregate_factor",
+          "legendFormat": "aggregate {{bucket}}",
+          "refId": "B"
+        },
+        {
+          "expr": "scheduler_marginal_prefill_gain{bucket!=\"1\"}",
+          "legendFormat": "marginal gain {{bucket}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 104,
+      "type": "timeseries",
+      "title": "Decode contention curve (ms/token, slowdown, marginal gain)",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": null
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "scheduler_decode_ms_per_token",
+          "legendFormat": "ms/tok {{bucket}}",
+          "refId": "A"
+        },
+        {
+          "expr": "scheduler_decode_slowdown_factor",
+          "legendFormat": "slowdown {{bucket}}",
+          "refId": "B"
+        },
+        {
+          "expr": "scheduler_marginal_decode_gain{bucket!=\"1\"}",
+          "legendFormat": "marginal gain {{bucket}}",
+          "refId": "C"
+        }
       ]
     }
   ]

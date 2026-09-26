@@ -70,8 +70,9 @@ PROFILE = {"PROFILE_FIXED_MS": "250", "PROFILE_PREFILL_MS_PER_TOK": "6.2",
            "PROFILE_DECODE_MS_PER_TOK": "25"}
 
 
-def gateway_env(model: str, port: int, cal_dir: str) -> dict:
-    return {
+def gateway_env(model: str, port: int, cal_dir: str, *,
+                admission: bool = False, gate: bool = False) -> dict:
+    env = {
         "GATEWAY_ADDR": "127.0.0.1:8080",
         "WORKERS": f"llama=http://127.0.0.1:{port}#{model}",
         "ROUTE_POLICY": "cache-aware-ect",
@@ -89,6 +90,14 @@ def gateway_env(model: str, port: int, cal_dir: str) -> dict:
         "CALIBRATION_MACHINE": "apple-m5",
         "CALIBRATION_SAVE_INTERVAL_S": "2",
     }
+    # The 4C knobs. The input budget (2 x 8K prompts) is the binding one:
+    # the output budget sits at exactly the c8 demand and never bites.
+    if admission:
+        env["ADMIT_MAX_ACTIVE_INPUT_TOKENS"] = "16384"
+        env["ADMIT_MAX_ACTIVE_OUTPUT_TOKENS"] = "2048"
+    if gate:
+        env["ADMIT_MARGINAL_COST"] = "1"
+    return env
 
 
 def wait_gateway_all_ready(slots: int, timeout_s: float = 90.0) -> dict:
@@ -408,6 +417,298 @@ def contention_wave(gateway_bin: Path, loadgen_bin: Path, study_dir: Path,
 
 
 # ---------------------------------------------------------------------------
+# The 16-cell serving-interaction matrix and the mixed interactive workload
+# ---------------------------------------------------------------------------
+
+WARM_SEED = 42          # the shared-prefix seed: warmups and measured runs
+SIZES = {"short": 1024, "long": 8192}
+UNIQUE = 128            # per-request unique suffix tokens
+MIXED_SLO_INTERACTIVE_TTFT_S = 5.0
+
+
+def parse_prom_text(text: str) -> dict:
+    """Minimal Prometheus text parser: {(name, labels): value}."""
+    import re
+    out = {}
+    pat = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{.*\})?\s+([-+e0-9.]+)$")
+    for ln in text.splitlines():
+        if ln.startswith("#") or not ln.strip():
+            continue
+        m = pat.match(ln.strip())
+        if not m:
+            continue
+        try:
+            v = float(m.group(3))
+        except ValueError:
+            continue
+        out[(m.group(1), m.group(2) or "")] = out.get((m.group(1), m.group(2) or ""), 0.0) + v
+    return out
+
+
+def scrape_evidence(leg_dir: Path) -> None:
+    status, body = http_get("http://127.0.0.1:8080/metrics")
+    raw = leg_dir / "gateway_metrics.txt"
+    js = leg_dir / "gateway_metrics.json"
+    if status != 200:
+        raw.write_text("")
+        js.write_text("{}")
+        return
+    raw.write_text(body)
+    parsed = {f"{name}{labels}": v for (name, labels), v in parse_prom_text(body).items()}
+    js.write_text(json.dumps(
+        {k: v for k, v in parsed.items()
+         if k.startswith("scheduler_") or k.startswith("inference_")}, indent=2))
+    status, body = http_get("http://127.0.0.1:8080/status")
+    if status == 200:
+        (leg_dir / "gateway_status.json").write_text(body)
+
+
+def extract_routing_log(gateway_log: Path, dest: Path) -> int:
+    if not gateway_log.exists():
+        return 0
+    lines = [ln for ln in gateway_log.read_text(errors="replace").splitlines()
+             if "routing decision" in ln or "contention gate" in ln]
+    dest.write_text("\n".join(lines) + "\n")
+    return len(lines)
+
+
+def warm_slots(loadgen_bin: Path, leg_dir: Path, model: str, size: int, n: int = 8) -> dict:
+    """Populate every slot's cache with the shared prefix: parallel pinned
+    one-shot loadgen runs THROUGH the gateway, same seed as the measured
+    run so the prefix is byte-identical."""
+    out_dir = leg_dir / "warm"
+    out_dir.mkdir(exist_ok=True)
+    procs = []
+    t0 = time.time()
+    for i in range(n):
+        cmd = [str(loadgen_bin),
+               "--endpoint", "http://127.0.0.1:8080",
+               "--model", model,
+               "--input-tokens", str(size),
+               "--shared-prefix-tokens", str(size - UNIQUE),
+               "--output-tokens", "4",
+               "--num-requests", "1",
+               "--concurrency", "1",
+               "--stream", "true",
+               "--seed", str(WARM_SEED),
+               "--pin-slot", str(i),
+               "--timeout-s", "900",
+               "--out-dir", str(out_dir / f"slot{i}")]
+        procs.append((i, subprocess.Popen(cmd, cwd=REPO,
+                                          stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.PIPE, text=True)))
+    results = []
+    for i, proc in procs:
+        _, err = proc.communicate()
+        results.append({"slot": i, "exit": proc.returncode,
+                        "err": (err or "")[-200:] if proc.returncode else None})
+    wall = round(time.time() - t0, 1)
+    ok = all(r["exit"] == 0 for r in results)
+    log(f"warm: {n} pinned populate run(s) in {wall}s, ok={ok}")
+    return {"requested": n, "ok": ok, "wall_s": wall, "results": results}
+
+
+def matrix_leg(gateway_bin: Path, loadgen_bin: Path, study_dir: Path,
+               model: str, rt, sampler: MemorySampler, cal_dir: str,
+               size_name: str, cache: str, admission: bool, gate: bool,
+               out_tokens: int, n: int, c: int, smoke: bool) -> dict:
+    """One cell of the 4C matrix: size x cache x admission x gate.
+    Cache state is rebuilt honestly per leg (process restart = cold; the
+    restart IS the only cache reset llama.cpp 0.4.1 offers)."""
+    leg = f"{size_name}-{cache}-admit{int(admission)}-gate{int(gate)}"
+    leg_dir = study_dir / leg
+    leg_dir.mkdir(parents=True, exist_ok=True)
+    size = SIZES[size_name]
+    shared = size - UNIQUE
+    record: dict = {"leg": leg, "size": size_name, "cache": cache,
+                    "admission": admission, "gate": gate}
+
+    sampler.phase = "reset"
+    if not rt.reset_cache():
+        record["verdict"] = "restart_failed"
+        return record
+    probe = rt.wait_functional(FUNCTIONAL_TIMEOUT_S)
+    record["post_reset_probe"] = {"ok": probe.ok, "error": probe.error}
+    if not probe.ok:
+        record["verdict"] = "not_functional_after_reset"
+        return record
+
+    with (leg_dir / "gateway.log").open("wb") as gw_log:
+        gw = subprocess.Popen(
+            [str(gateway_bin)], stdout=gw_log, stderr=subprocess.STDOUT,
+            env={**os.environ, **gateway_env(model, rt.port, cal_dir,
+                                             admission=admission, gate=gate)},
+            cwd=REPO, start_new_session=True)
+        try:
+            record["gateway_at_start"] = wait_gateway_all_ready(8)
+
+            if cache == "warm":
+                sampler.phase = f"{leg}-warm"
+                record["warm"] = warm_slots(loadgen_bin, leg_dir, model, size)
+                if not record["warm"]["ok"]:
+                    record["verdict"] = "warm_failed"
+                    return record
+                time.sleep(1.0)
+
+            sampler.phase = leg
+            write_matrix(leg_dir / "leg.toml", f"serving-interactions-{leg}",
+                         f"4C {leg}: {size}t prompts ({shared}+{UNIQUE}), "
+                         f"n={n} c={c} out={out_tokens}",
+                         model, input_tokens=size, shared=shared,
+                         out_tokens=out_tokens, concurrency=c,
+                         num_requests=n, seed=WARM_SEED)
+            t0 = time.time()
+            rec = run_loadgen(loadgen_bin, leg_dir / "leg.toml", leg_dir,
+                              leg_dir / "run.log")
+            record["run_exit"] = rec["exit"]
+            record["run_wall_s"] = round(time.time() - t0, 1)
+
+            time.sleep(2)
+            sampler.phase = "post_probe"
+            scrape_evidence(leg_dir)
+            record["routing_decision_lines"] = extract_routing_log(
+                leg_dir / "gateway.log", leg_dir / "routing_decisions.log")
+
+            post = rt.functional_probe(phase=f"post_{leg}")
+            record["post_run_probe"] = {"ok": post.ok, "tokens": post.tokens,
+                                        "error": post.error}
+            record["verdict"] = ("healthy"
+                                 if post.ok and record["run_exit"] == 0
+                                 else "degraded")
+        finally:
+            stop_gateway(gw)
+    return record
+
+
+def cache_matrix(gateway_bin: Path, loadgen_bin: Path, study_dir: Path,
+                 model: str, rt, sampler: MemorySampler, cal_dir: str,
+                 smoke: bool) -> list[dict]:
+    """2 sizes x 2 cache states x 2 admission x 2 contention policies = 16."""
+    out_tokens = 32 if smoke else OUTPUT_TOKENS
+    n = c = 4 if smoke else 8
+    sizes = ["short"] if smoke else list(SIZES)
+    cells = [(s, cache, adm, gate)
+             for s in sizes
+             for cache in ("cold", "warm")
+             for adm in (False, True)
+             for gate in (False, True)]
+    legs = []
+    for (size_name, cache, adm, gate) in cells:
+        log(f"=== cell {size_name}-{cache}-admit{int(adm)}-gate{int(gate)}")
+        rec = matrix_leg(gateway_bin, loadgen_bin, study_dir, model, rt,
+                         sampler, cal_dir, size_name, cache, adm, gate,
+                         out_tokens, n, c, smoke)
+        legs.append(rec)
+        log(f"=== cell {rec['leg']}: {rec.get('verdict')} "
+            f"(exit={rec.get('run_exit')}, wall={rec.get('run_wall_s')}s)")
+    return legs
+
+
+def mixed_arrival(loadgen_bin: Path, phase_dir: Path, model: str, tag: str,
+                  *, n: int, c: int, input_tokens: int, shared: int,
+                  out_tokens: int, seed: int, service_class: str) -> subprocess.Popen:
+    """One class-tagged concurrent burst process of the mixed workload."""
+    toml = phase_dir / f"{tag}.toml"
+    write_matrix(toml, f"mixed-{tag}", f"mixed workload {tag} ({service_class})",
+                 model, input_tokens=input_tokens, shared=shared,
+                 out_tokens=out_tokens, concurrency=c, num_requests=n,
+                 seed=seed)
+    # The class tag rides the matrix defaults onto every request.
+    text = toml.read_text()
+    text = text.replace("[defaults]\n", f"[defaults]\nservice_class = \"{service_class}\"\n", 1)
+    toml.write_text(text)
+    return subprocess.Popen(
+        [str(loadgen_bin), "--matrix", str(toml), "--out-dir", str(phase_dir)],
+        cwd=REPO, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+
+def mixed_workload(gateway_bin: Path, loadgen_bin: Path, study_dir: Path,
+                   model: str, rt, sampler: MemorySampler, cal_dir: str) -> dict:
+    """The 4C centerpiece: 2x8K warm-prefix + 2x8K cold + 4x1K interactive,
+    all arriving over one short burst, run twice - baseline (admission off,
+    gate off) vs full stack (admission on, contention gate on). Warm-cache
+    state before each config, classes on the wire, interactive SLO 5 s."""
+    record: dict = {"leg": "mixed", "slo_interactive_ttft_s": MIXED_SLO_INTERACTIVE_TTFT_S}
+    record["configs"] = []
+    for config, admission, gate in (("baseline", False, False), ("full", True, True)):
+        cfg_dir = study_dir / f"mixed-{config}"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        cfg: dict = {"config": config, "admission": admission, "gate": gate}
+
+        if not rt.reset_cache():
+            cfg["verdict"] = "restart_failed"
+            record["configs"].append(cfg)
+            continue
+        if not rt.wait_functional(FUNCTIONAL_TIMEOUT_S).ok:
+            cfg["verdict"] = "not_functional_after_reset"
+            record["configs"].append(cfg)
+            continue
+
+        with (cfg_dir / "gateway.log").open("wb") as gw_log:
+            gw = subprocess.Popen(
+                [str(gateway_bin)], stdout=gw_log, stderr=subprocess.STDOUT,
+                env={**os.environ, **gateway_env(model, rt.port, cal_dir,
+                                                 admission=admission, gate=gate)},
+                cwd=REPO, start_new_session=True)
+            try:
+                cfg["gateway_at_start"] = wait_gateway_all_ready(8)
+                sampler.phase = f"mixed-{config}-warm"
+                cfg["warm"] = warm_slots(loadgen_bin, cfg_dir, model,
+                                         SIZES["long"])
+                if not cfg["warm"]["ok"]:
+                    cfg["verdict"] = "warm_failed"
+                    record["configs"].append(cfg)
+                    continue
+                time.sleep(1.0)
+
+                # One short burst: 2 warm 8K (long_context/standard),
+                # 2 cold 8K (batch), 4 1K (interactive). Distinct seeds for
+                # the cold and interactive classes (honestly cold), the
+                # warm class reuses the warm prefix seed.
+                sampler.phase = f"mixed-{config}"
+                procs = [
+                    ("long-context", mixed_arrival(
+                        loadgen_bin, cfg_dir, model, "long-context", n=2, c=2,
+                        input_tokens=SIZES["long"], shared=SIZES["long"] - UNIQUE,
+                        out_tokens=OUTPUT_TOKENS, seed=WARM_SEED,
+                        service_class="standard")),
+                    ("batch", mixed_arrival(
+                        loadgen_bin, cfg_dir, model, "batch", n=2, c=2,
+                        input_tokens=SIZES["long"], shared=0,
+                        out_tokens=OUTPUT_TOKENS, seed=777,
+                        service_class="batch")),
+                    ("interactive", mixed_arrival(
+                        loadgen_bin, cfg_dir, model, "interactive", n=4, c=4,
+                        input_tokens=SIZES["short"], shared=0,
+                        out_tokens=OUTPUT_TOKENS, seed=555,
+                        service_class="interactive")),
+                ]
+                t0 = time.time()
+                for tag, proc in procs:
+                    _, err = proc.communicate()
+                    cfg[f"{tag}_exit"] = proc.returncode
+                    if proc.returncode != 0:
+                        (cfg_dir / f"{tag}.log").write_text((err or "")[-2000:])
+                cfg["run_wall_s"] = round(time.time() - t0, 1)
+
+                time.sleep(2)
+                sampler.phase = "post_probe"
+                scrape_evidence(cfg_dir)
+                cfg["routing_decision_lines"] = extract_routing_log(
+                    cfg_dir / "gateway.log", cfg_dir / "routing_decisions.log")
+                post = rt.functional_probe(phase=f"post_mixed_{config}")
+                cfg["post_run_probe"] = {"ok": post.ok, "error": post.error}
+                exits_ok = all(cfg.get(f"{t}_exit") == 0
+                               for t in ("long-context", "batch", "interactive"))
+                cfg["verdict"] = ("healthy" if post.ok and exits_ok else "degraded")
+            finally:
+                stop_gateway(gw)
+        record["configs"].append(cfg)
+        log(f"=== mixed/{config}: {cfg.get('verdict')} (wall={cfg.get('run_wall_s')}s)")
+    return record
+
+
+# ---------------------------------------------------------------------------
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -421,6 +722,10 @@ def main() -> int:
     ap.add_argument("--contention-wave", action="store_true",
                     help="run the controlled contention wave "
                          "(prefill levels, decode scaling, decode interference)")
+    ap.add_argument("--matrix", action="store_true",
+                    help="run the 16-cell cache x admission x contention matrix")
+    ap.add_argument("--mixed", action="store_true",
+                    help="run the mixed interactive workload (baseline vs full stack)")
     ap.add_argument("--rounds", type=int, default=2,
                     help="rounds per contention level (default 2)")
     ap.add_argument("--smoke", action="store_true",
@@ -428,8 +733,8 @@ def main() -> int:
                          "validate the pipeline; not comparable data")
     args = ap.parse_args()
 
-    if not args.contention_wave:
-        log("nothing to do: pass --contention-wave (matrix/mixed land in a later commit)")
+    if not (args.contention_wave or args.matrix or args.mixed):
+        log("nothing to do: pass --contention-wave, --matrix and/or --mixed")
         return 2
     if not args.gateway.exists():
         sys.exit("gateway binary missing — cargo build --release -p gateway")
@@ -455,13 +760,27 @@ def main() -> int:
             sys.exit(f"{rt.name} never went live")
         time.sleep(2)
         sampler.phase = "after_load"
-        log("=== contention wave (controlled prefill/decode levels)")
-        record = contention_wave(args.gateway, loadgen_bin, study_dir,
-                                 rt.model, rt, sampler, cal_dir,
-                                 rounds=args.rounds, smoke=args.smoke)
-        log(f"=== contention wave: {record.get('verdict')} "
-            f"(saturation level={record.get('prefill_saturation_level')}, "
-            f"wall={record.get('wall_s')}s)")
+        if args.contention_wave:
+            log("=== contention wave (controlled prefill/decode levels)")
+            record["wave"] = contention_wave(args.gateway, loadgen_bin, study_dir,
+                                             rt.model, rt, sampler, cal_dir,
+                                             rounds=args.rounds, smoke=args.smoke)
+            wave = record["wave"]
+            log(f"=== contention wave: {wave.get('verdict')} "
+                f"(saturation level={wave.get('prefill_saturation_level')}, "
+                f"wall={wave.get('wall_s')}s)")
+        if args.matrix:
+            log("=== 16-cell serving-interaction matrix")
+            record["matrix"] = cache_matrix(args.gateway, loadgen_bin, study_dir,
+                                            rt.model, rt, sampler, cal_dir,
+                                            smoke=args.smoke)
+            healthy = sum(1 for leg in record["matrix"]
+                          if leg.get("verdict") == "healthy")
+            log(f"=== matrix: {healthy}/{len(record['matrix'])} legs healthy")
+        if args.mixed:
+            log("=== mixed interactive workload (baseline vs full stack)")
+            record["mixed"] = mixed_workload(args.gateway, loadgen_bin, study_dir,
+                                             rt.model, rt, sampler, cal_dir)
     finally:
         rt.stop()
         sampler.stop()
@@ -484,7 +803,7 @@ def main() -> int:
             ),
             "smoke": args.smoke,
             "rounds": args.rounds,
-            "wave": record,
+            "stages": record,
             "memory_peak_rss_mb": round(sampler.peak_rss_mb, 1),
             "memory_peak_footprint_mb": round(sampler.peak_footprint_mb, 1),
         }
