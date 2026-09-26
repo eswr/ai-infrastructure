@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "bucket_labels": [
+    "1",
+    "2",
+    "3-4",
+    "5-8"
+  ],
+  "machine": "apple-m5",
+  "runtime": "llama",
+  "model": "Qwen3.5-9B-Q4_K_M.gguf",
+  "slot_count": 8,
+  "updated_at_epoch_s": 1790447909,
+  "prefill": {
+    "fixed_ms": 0.0,
+    "ms_per_token": 11.223549793916167,
+    "samples": 101,
+    "contention_multiplier": [
+      0.5,
+      0.7968630498230974,
+      0.5,
+      1.0
+    ],
+    "contention_samples": [
+      101,
+      2,
+      6,
+      0
+    ]
+  },
+  "decode": {
+    "ms_per_token": [
+      450.3229572617762,
+      1151.0614897218713,
+      1184.3656016417767,
+      1039.0972388867472
+    ],
+    "samples": [
+      20,
+      15,
+      28,
+      46
+    ]
+  }
+}
