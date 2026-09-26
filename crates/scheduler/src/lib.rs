@@ -196,11 +196,14 @@ pub struct SlotCacheEntry {
     /// the entry (drives reuse estimates while POPULATING).
     pub expected_est_tokens: u64,
     /// Server-reported prompt size of the request whose completion made
-    /// the entry RESIDENT.
+    /// the entry RESIDENT — after that completion the slot HOLDS this
+    /// much reusable prefix for the fingerprint.
     pub prompt_real_tokens: u64,
-    /// Server-reported reusable-prefix tokens at that completion
-    /// (llama.cpp `timings.cache_n`).
-    pub cached_real_tokens: u64,
+    /// What THIS request's own completion reported reusing (llama.cpp
+    /// `timings.cache_n`). Telemetry only — a 0 here means "I didn't
+    /// reuse", never "the slot has nothing": the request just prefilled
+    /// its whole prompt into the slot.
+    pub last_reuse_observed_real: u64,
     pub last_used: Instant,
 }
 
@@ -689,19 +692,15 @@ impl WorkerHandle {
                 let reusable = match e.state {
                     CacheInvestment::Absent => 0,
                     CacheInvestment::Populating => e.expected_est_tokens.min(prompt_est_tokens),
-                    CacheInvestment::Resident => {
-                        let frac = if e.prompt_real_tokens > 0 {
-                            e.cached_real_tokens as f64 / e.prompt_real_tokens as f64
-                        } else {
-                            0.0
-                        };
-                        ((frac * prompt_est_tokens as f64).round() as u64)
-                            .min(prompt_est_tokens)
-                    }
+                    // RESIDENT: the slot holds the completing request's
+                    // whole prompt for this fingerprint — up to that
+                    // prompt's real size, translated into this request's
+                    // estimated units (a 100-token probe holds 100).
+                    CacheInvestment::Resident => e.prompt_real_tokens.min(prompt_est_tokens),
                 };
                 SlotCacheView {
                     state: e.state,
-                    reusable_tokens: reusable,
+                    reusable_tokens: reusable.min(prompt_est_tokens),
                     last_used: Some(e.last_used),
                 }
             }
@@ -732,7 +731,7 @@ impl WorkerHandle {
                 state: CacheInvestment::Populating,
                 expected_est_tokens: prompt_est_tokens,
                 prompt_real_tokens: 0,
-                cached_real_tokens: 0,
+                last_reuse_observed_real: 0,
                 last_used: Instant::now(),
             });
         } else if let Some(e) = guard.as_mut() {
@@ -741,28 +740,26 @@ impl WorkerHandle {
         }
     }
 
-    /// Record the runtime's own reuse telemetry from a completed request:
-    /// the prefix is now RESIDENT with `cached_real_tokens` of
-    /// `prompt_real_tokens` observed reusable. No-op for whole-worker
-    /// handles.
+    /// Record a completed request on the slot. Whatever this request
+    /// itself reused, the slot now HOLDS its full prompt as reusable
+    /// state for the fingerprint — a miss (`reused_observed == 0`) is how
+    /// a population looks, not evidence of an empty cache. No-op for
+    /// whole-worker handles.
     pub fn note_slot_completion(
         &self,
         fingerprint: u64,
         prompt_real_tokens: u64,
-        cached_real_tokens: u64,
+        reused_observed_real_tokens: u64,
     ) {
         if self.slot.is_none() {
             return;
         }
         let mut guard = self.slot_cache.lock().unwrap_or_else(|e| e.into_inner());
-        // Whatever the model thought before: the slot's cache now holds
-        // this request's prompt, of which the runtime reports
-        // cached_real_tokens positions were served from cache.
         if matches!(guard.as_ref(), Some(e) if e.fingerprint == fingerprint) {
             let e = guard.as_mut().expect("checked above");
             e.state = CacheInvestment::Resident;
             e.prompt_real_tokens = prompt_real_tokens;
-            e.cached_real_tokens = cached_real_tokens;
+            e.last_reuse_observed_real = reused_observed_real_tokens;
             e.last_used = Instant::now();
         } else {
             *guard = Some(SlotCacheEntry {
@@ -770,7 +767,7 @@ impl WorkerHandle {
                 state: CacheInvestment::Resident,
                 expected_est_tokens: 0,
                 prompt_real_tokens,
-                cached_real_tokens,
+                last_reuse_observed_real: reused_observed_real_tokens,
                 last_used: Instant::now(),
             });
         }
@@ -974,16 +971,16 @@ impl Router {
         // models slots (external cache warmers teach the model this way).
         if let Some(pin) = req.pinned_slot {
             if let Some(w) = candidates.iter().find(|w| w.slot == Some(pin)) {
-                let est_prefill = w.prefill_cost_ms(req.input_tokens, req.input_tokens.min(
-                    w.slot_cache_view(req.prefix_hash, req.input_tokens).reusable_tokens,
-                ));
+                // Price from the pre-dispatch state, then reserve — the
+                // exported table must show what the DECISION saw.
+                let view = self.single_view(w, &req);
+                let est_prefill = w.prefill_cost_ms(req.input_tokens, view.reusable_tokens);
                 let est_total =
                     est_prefill + w.decode_ms_per_tok() * req.output_tokens as f64;
                 let work_start = w.begin_work(est_total, est_prefill);
                 w.inc_outstanding();
                 w.note_slot_dispatch(req.prefix_hash, req.input_tokens);
                 w.remember_prefix(req.prefix_hash);
-                let view = self.single_view(w, &req);
                 return SelectOutcome::Decided(RouteDecision {
                     worker: w.clone(),
                     work_start,
@@ -1494,15 +1491,16 @@ mod tests {
         assert_eq!(v.state, CacheInvestment::Populating);
         assert_eq!(v.reusable_tokens, 8400, "populating reuse = expected prompt size");
 
-        s0.note_slot_completion(42, 11_400, 11_350);
+        s0.note_slot_completion(42, 11_400, 0);
         let v = s0.slot_cache_view(42, 8400);
         assert_eq!(v.state, CacheInvestment::Resident);
-        // Observed reuse scales by cached/prompt fraction (~99.6% here).
-        assert!(
-            (8300..=8400).contains(&v.reusable_tokens),
-            "reuse should track the observed fraction, got {}",
-            v.reusable_tokens
-        );
+        // A MISS completion is how a population looks: the request reused
+        // nothing, but the slot now HOLDS its whole prompt as reusable
+        // state (the 4B.2 study's own telemetry caught the original
+        // version of this model conflating the two).
+        assert_eq!(v.reusable_tokens, 8400, "resident = full prompt held");
+        let snap = s0.slot_cache_snapshot().unwrap();
+        assert_eq!(snap.last_reuse_observed_real, 0, "observed reuse kept for telemetry");
 
         // A different fingerprint replaces the single-sequence entry.
         s0.note_slot_dispatch(43, 8400);
@@ -1611,11 +1609,12 @@ mod tests {
             RouterConfig { min_cache_savings_ms: 10_000.0 },
         )
         .unwrap();
-        // 100 of 11,400 real tokens reusable ≈ 460 ms of savings — far
-        // under the floor. The warm slot (index 3) must be priced cold;
-        // the argmin tie then resolves to index 0, and the floor-refused
-        // hit still shows up as an attributed bypass.
-        r.workers()[3].note_slot_completion(7, 11_400, 100);
+        // A slot that only ever held a tiny probe prompt (100 real tokens)
+        // offers ~620 ms of savings — far under the floor. The warm slot
+        // (index 3) must be priced cold; the argmin tie then resolves to
+        // index 0, and the floor-refused hit still shows up as an
+        // attributed bypass.
+        r.workers()[3].note_slot_completion(7, 100, 0);
         let d = decided(r.select_reserved(shape(7, 8400, 256)));
         assert_eq!(d.worker.slot, Some(0), "sub-floor reuse must not sticky-route");
         assert_eq!(d.reason, DecisionReason::InsufficientBenefit);

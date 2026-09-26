@@ -677,8 +677,8 @@ async fn status(State(st): State<Arc<AppState>>) -> Response {
                 "cache": cache.map(|c| serde_json::json!({
                     "fingerprint": format!("{:016x}", c.fingerprint),
                     "state": c.state.as_str(),
-                    "prompt_real_tokens": c.prompt_real_tokens,
-                    "cached_real_tokens": c.cached_real_tokens,
+                    "held_real_tokens": c.prompt_real_tokens,
+                    "last_reuse_observed_real": c.last_reuse_observed_real,
                 })),
             })
         })
@@ -814,7 +814,7 @@ async fn gauge_sampler(st: Arc<AppState>) {
                     m.worker_cache_state.with_label_values(&[id]).set(state_n);
                     m.worker_cache_tokens
                         .with_label_values(&[id])
-                        .set(c.cached_real_tokens as i64);
+                        .set(c.prompt_real_tokens as i64);
                 }
                 None => {
                     m.worker_cache_state.with_label_values(&[id]).set(0);
