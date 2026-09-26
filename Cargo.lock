@@ -696,6 +696,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "inference-lab-worker-lifecycle",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]

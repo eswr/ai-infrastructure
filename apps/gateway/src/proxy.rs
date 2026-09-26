@@ -19,7 +19,7 @@ use crate::admission::{AdmissionPermit, TokenEstimator};
 use crate::metrics::Metrics;
 use futures_util::{Stream, StreamExt};
 use inference_lab_protocol::{chunk_text, ChatCompletionChunk, Usage};
-use inference_lab_scheduler::WorkerHandle;
+use inference_lab_scheduler::{DispatchTicket, WorkerHandle};
 use inference_lab_streaming::SseParser;
 use inference_lab_worker_lifecycle::{Dimension, FailureReason};
 use opentelemetry::trace::TraceContextExt;
@@ -197,8 +197,10 @@ pub struct StreamCtx {
     /// after generation started (0/off = None).
     pub stream_stall_timeout: Option<Duration>,
     pub stream_mode: bool,
-    /// (start, est_ms) pair registered with `worker.begin_work`.
-    pub work_estimate: (Instant, f64),
+    /// The dispatch reservation registered with `worker.begin_work` —
+    /// passed back to `end_work` and used to attribute service-model
+    /// observations to the right dispatch.
+    pub work_estimate: DispatchTicket,
     /// Total estimated service time for saved-compute accounting.
     pub est_total_ms: f64,
 }
@@ -437,13 +439,15 @@ impl<S> InstrumentedStream<S> {
             }
         }
 
-        // Adaptive service model.
+        // Adaptive service model: observations attribute to this dispatch's
+        // ticket, so the shared server calibration can bucket them by the
+        // concurrency it actually ran under.
         if let Some(wft) = tl.worker_first_token() {
-            w.record_prefill(tl.est_input_tokens, wft.as_secs_f64() * 1000.0);
+            w.record_prefill(tl.est_input_tokens, wft.as_secs_f64() * 1000.0, &self.ctx.work_estimate);
         }
         if matches!(outcome, Outcome::Completed) {
             if let (Some(dec), 2..) = (tl.decode_phase(), tl.output_tokens) {
-                w.record_decode(tl.output_tokens, dec.as_secs_f64() * 1000.0);
+                w.record_decode(tl.output_tokens, dec.as_secs_f64() * 1000.0, &self.ctx.work_estimate);
             }
         }
 
@@ -515,7 +519,7 @@ impl<S> InstrumentedStream<S> {
 
         // Worker bookkeeping. A draining worker's last completion ends the
         // drain (DRAINING → STOPPED); those transitions hit metrics too.
-        w.end_work(self.ctx.work_estimate.0, self.ctx.work_estimate.1);
+        w.end_work(&self.ctx.work_estimate);
         let drained = w.dec_outstanding();
         m.record_transitions(w, &drained);
 
@@ -721,6 +725,7 @@ mod tests {
         // The handler sets this on dispatch; the stream-fairness completion
         // histogram needs it to have a start to measure from.
         timeline.headers_at = Some(Instant::now());
+        let work_estimate = worker.begin_work(100.0, 100.0);
         let ctx = StreamCtx {
             metrics: metrics.clone(),
             worker,
@@ -739,7 +744,7 @@ mod tests {
             first_token_deadline: None,
             stream_stall_timeout: None,
             stream_mode: true,
-            work_estimate: (Instant::now(), 100.0),
+            work_estimate,
             est_total_ms: 100.0,
         };
         (metrics, ctx)

@@ -79,10 +79,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-/// EWMA update weight for service-model parameters. Small on purpose: the
-/// prefill regression solves a 2×2 system every update and needs a long,
-/// stable memory to separate fixed overhead from per-token cost.
-const EWMA_ALPHA: f64 = 0.05;
+pub mod calibration;
+pub use calibration::{
+    bucket_index, bucket_label, CalibrationKey, CalibrationProfile, CalibrationStore,
+    DispatchTicket, DecodeCalibration, PrefillCalibration, RuntimeCalibration, BUCKET_LABELS,
+};
+
+/// Clamp band for each parameter; observations outside it are noise (or a
+/// pathological runtime) and get pinned to the edge, never NaN/below zero.
+pub(crate) fn clamp(v: f64, lo: f64, hi: f64) -> f64 {
+    v.clamp(lo, hi)
+}
 
 // ---------------------------------------------------------------------------
 // Routing policy
@@ -312,9 +319,9 @@ impl DecisionReason {
 /// decision table for telemetry.
 pub struct RouteDecision {
     pub worker: Arc<WorkerHandle>,
-    /// `begin_work` instant from the reservation made at selection time —
-    /// the caller MUST pass it to `end_work` exactly once.
-    pub work_start: Instant,
+    /// Reservation ticket from selection time — the caller MUST pass it to
+    /// `end_work` exactly once.
+    pub work_start: DispatchTicket,
     pub est_total_ms: f64,
     pub est_prefill_ms: f64,
     pub policy: RoutingPolicy,
@@ -394,95 +401,6 @@ impl Default for RouterConfig {
     }
 }
 
-/// Clamp band for each parameter; observations outside it are noise (or a
-/// pathological runtime) and get pinned to the edge, never NaN/below zero.
-fn clamp(v: f64, lo: f64, hi: f64) -> f64 {
-    v.clamp(lo, hi)
-}
-
-struct Ewma {
-    value: Mutex<f64>,
-}
-
-impl Ewma {
-    fn seeded(v: f64) -> Self {
-        Self { value: Mutex::new(v) }
-    }
-
-    fn get(&self) -> f64 {
-        *self.value.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// One EWMA step; returns the new value.
-    fn update(&self, obs: f64) -> f64 {
-        let mut v = self.value.lock().unwrap_or_else(|e| e.into_inner());
-        *v += EWMA_ALPHA * (obs - *v);
-        *v
-    }
-}
-
-/// Exponentially-weighted online least squares for
-/// `y = fixed + rate·t` (prefill time vs input tokens). Solving the normal
-/// equations each update is exact and unconditionally stable, unlike
-/// per-parameter gradient steps which oscillate on this problem.
-struct OnlineRateModel {
-    fixed: Mutex<f64>,
-    rate: Mutex<f64>,
-    // EWMA moments: E[1], E[t], E[t²], E[y], E[t·y]
-    m_n: Ewma,
-    m_t: Ewma,
-    m_tt: Ewma,
-    m_y: Ewma,
-    m_ty: Ewma,
-    /// Minimum weighted variance of t before the split is identifiable.
-    min_t_variance: f64,
-}
-
-impl OnlineRateModel {
-    fn seeded(fixed: f64, rate: f64) -> Self {
-        Self {
-            fixed: Mutex::new(fixed),
-            rate: Mutex::new(rate),
-            m_n: Ewma::seeded(1.0),
-            m_t: Ewma::seeded(0.0),
-            m_tt: Ewma::seeded(0.0),
-            m_y: Ewma::seeded(0.0),
-            m_ty: Ewma::seeded(0.0),
-            min_t_variance: 1.0,
-        }
-    }
-
-    fn fixed(&self) -> f64 {
-        *self.fixed.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn rate(&self) -> f64 {
-        *self.rate.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Feed one (t, y) observation; refits fixed/rate when the observed
-    /// prompt sizes have enough spread to identify both parameters.
-    fn observe(&self, t: f64, y: f64) {
-        self.m_n.update(1.0);
-        self.m_t.update(t);
-        self.m_tt.update(t * t);
-        self.m_y.update(y);
-        self.m_ty.update(t * y);
-
-        let (n, mt, mtt, my, mty) =
-            (self.m_n.get(), self.m_t.get(), self.m_tt.get(), self.m_y.get(), self.m_ty.get());
-        let var_t = mtt - mt * mt / n;
-        if var_t < self.min_t_variance * n {
-            // Not enough spread in prompt sizes yet — keep the seeds.
-            return;
-        }
-        let rate = clamp((mty - mt * my / n) / var_t, 0.1, 50.0);
-        let fixed = clamp((my - rate * mt) / n, 0.0, 10_000.0);
-        *self.rate.lock().unwrap_or_else(|e| e.into_inner()) = rate;
-        *self.fixed.lock().unwrap_or_else(|e| e.into_inner()) = fixed;
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Worker
 // ---------------------------------------------------------------------------
@@ -490,11 +408,7 @@ impl OnlineRateModel {
 /// One active dispatch's cost estimate, for remaining-work accounting.
 #[derive(Debug, Clone, Copy)]
 struct ActiveEstimate {
-    started: Instant,
-    est_total_ms: f64,
-    /// The prefill portion of `est_total_ms`: a dispatch younger than this
-    /// is still prefilling (the prefill-pressure bypass signal).
-    est_prefill_ms: f64,
+    ticket: DispatchTicket,
 }
 
 pub struct WorkerHandle {
@@ -513,9 +427,12 @@ pub struct WorkerHandle {
     /// serve traffic; everything else is quarantined.
     lifecycle: Mutex<WorkerLifecycle>,
 
-    // Adaptive service model: prefill regression + decode EWMA.
-    prefill_model: OnlineRateModel,
-    decode_ms_per_tok: Ewma,
+    /// Shared performance model of the SERVER this handle belongs to:
+    /// prefill regression, per-concurrency-bucket decode rates, prefill
+    /// contention multipliers and the active-dispatch registry. All slot
+    /// handles of one llama.cpp server share one GPU — so they share one
+    /// calibration, and its bucketed rates are what pricing consults.
+    cal: Arc<RuntimeCalibration>,
 
     /// Active dispatches with their estimates. Drives remaining-work ECT
     /// scoring, the prefill-pressure signal and gauge export.
@@ -548,6 +465,31 @@ impl WorkerHandle {
         runtime: impl Into<String>,
         defaults: ServiceDefaults,
     ) -> Self {
+        let model = model.into();
+        let runtime = runtime.into();
+        let cal = Arc::new(RuntimeCalibration::from_seeds("local", &runtime, &model, 0, defaults));
+        Self::build(id, endpoint, model, runtime, cal)
+    }
+
+    /// Attach this handle to a (possibly shared) server calibration. All
+    /// slot workers of one upstream pass the SAME `Arc`.
+    pub fn with_calibration(
+        id: impl Into<String>,
+        endpoint: impl Into<String>,
+        model: impl Into<String>,
+        runtime: impl Into<String>,
+        cal: Arc<RuntimeCalibration>,
+    ) -> Self {
+        Self::build(id, endpoint, model, runtime, cal)
+    }
+
+    fn build(
+        id: impl Into<String>,
+        endpoint: impl Into<String>,
+        model: impl Into<String>,
+        runtime: impl Into<String>,
+        cal: Arc<RuntimeCalibration>,
+    ) -> Self {
         Self {
             id: id.into(),
             endpoint: endpoint.into(),
@@ -557,12 +499,16 @@ impl WorkerHandle {
             slot: None,
             outstanding: AtomicU64::new(0),
             lifecycle: Mutex::new(WorkerLifecycle::new(LifecyclePolicy::default())),
-            prefill_model: OnlineRateModel::seeded(defaults.fixed_ms, defaults.prefill_ms_per_tok),
-            decode_ms_per_tok: Ewma::seeded(defaults.decode_ms_per_tok),
+            cal,
             active_estimates: Mutex::new(Vec::new()),
             cached_prefixes: Mutex::new(HashSet::new()),
             slot_cache: Mutex::new(None),
         }
+    }
+
+    /// The shared server model this handle prices with.
+    pub fn calibration(&self) -> Arc<RuntimeCalibration> {
+        self.cal.clone()
     }
 
     pub fn outstanding(&self) -> u64 {
@@ -588,19 +534,23 @@ impl WorkerHandle {
     // -- service model ------------------------------------------------------
 
     pub fn fixed_overhead_ms(&self) -> f64 {
-        self.prefill_model.fixed()
+        self.cal.prefill_base().0
     }
 
     pub fn prefill_ms_per_tok(&self) -> f64 {
-        self.prefill_model.rate()
+        self.cal.prefill_base().1
     }
 
+    /// Solo decode rate (ms/token). The bucketed view of decode lives in
+    /// the shared calibration — this is the unloaded truth for legacy
+    /// formulas and admission pricing.
     pub fn decode_ms_per_tok(&self) -> f64 {
-        self.decode_ms_per_tok.get()
+        self.cal.decode_rate_solo()
     }
 
     /// Prefill cost in ms for `input_tokens` estimated tokens of which
-    /// `reusable_tokens` are already cached on this worker.
+    /// `reusable_tokens` are already cached on this worker (solo rates —
+    /// contention-aware pricing goes through the calibration directly).
     pub fn prefill_cost_ms(&self, input_tokens: u64, reusable_tokens: u64) -> f64 {
         self.fixed_overhead_ms()
             + (input_tokens.saturating_sub(reusable_tokens)) as f64 * self.prefill_ms_per_tok()
@@ -612,45 +562,45 @@ impl WorkerHandle {
         let prefill = self.prefill_ms_per_tok()
             * input_tokens as f64
             * if prefix_hit { 0.3 } else { 1.0 };
-        let decode = self.decode_ms_per_tok.get() * output_tokens as f64;
+        let decode = self.decode_ms_per_tok() * output_tokens as f64;
         self.fixed_overhead_ms() + prefill + decode
     }
 
     /// Feed one `worker_first_token_ms` observation (response headers →
-    /// first streamed token; queue wait excluded by construction). The
-    /// (fixed, ms/token) split refits once observed prompt sizes vary.
-    pub fn record_prefill(&self, input_tokens: u64, worker_first_token_ms: f64) {
-        self.prefill_model
-            .observe(input_tokens.max(1) as f64, worker_first_token_ms);
+    /// first streamed token; queue wait excluded by construction) for the
+    /// dispatch `ticket`. The (fixed, ms/token) split refits once observed
+    /// prompt sizes vary, and the dispatch's concurrency bucket learns its
+    /// contention multiplier.
+    pub fn record_prefill(&self, input_tokens: u64, worker_first_token_ms: f64, ticket: &DispatchTicket) {
+        self.cal.observe_prefill(input_tokens.max(1), worker_first_token_ms, ticket);
     }
 
-    /// Feed one streaming observation: ms spent decoding `output_tokens`.
-    pub fn record_decode(&self, output_tokens: u64, streaming_ms: f64) {
-        let toks = output_tokens.max(1) as f64;
-        let obs = streaming_ms / toks;
-        self.decode_ms_per_tok.update(clamp(obs, 1.0, 2_000.0));
+    /// Feed one streaming observation for dispatch `ticket`: ms spent
+    /// decoding `output_tokens` under whatever load the server carried.
+    pub fn record_decode(&self, output_tokens: u64, streaming_ms: f64, ticket: &DispatchTicket) {
+        self.cal.observe_decode(output_tokens.max(1), streaming_ms, ticket);
     }
 
     // -- active-work tracking (ECT) ------------------------------------------
 
     /// Register a dispatch with its estimated total AND prefill service
-    /// time. Returns the start instant to hand back to
-    /// [`WorkerHandle::end_work`]. Reservations made here are what make
-    /// concurrent selections under a burst see each other.
-    pub fn begin_work(&self, est_total_ms: f64, est_prefill_ms: f64) -> Instant {
-        let started = Instant::now();
+    /// time. Returns the [`DispatchTicket`] to hand back to
+    /// [`WorkerHandle::end_work`] exactly once. Reservations made here are
+    /// what make concurrent selections under a burst see each other — in
+    /// both this worker's queue and the server-wide concurrency buckets.
+    pub fn begin_work(&self, est_total_ms: f64, est_prefill_ms: f64) -> DispatchTicket {
+        let ticket = self.cal.register_dispatch(est_total_ms, est_prefill_ms);
         if let Ok(mut v) = self.active_estimates.lock() {
-            v.push(ActiveEstimate { started, est_total_ms, est_prefill_ms });
+            v.push(ActiveEstimate { ticket });
         }
-        started
+        ticket
     }
 
-    /// Remove a finished dispatch (idempotent: first matching entry goes).
-    pub fn end_work(&self, started: Instant, est_ms: f64) {
+    /// Remove a finished dispatch (idempotent: unknown tickets are ignored).
+    pub fn end_work(&self, ticket: &DispatchTicket) {
+        self.cal.unregister_dispatch(ticket);
         if let Ok(mut v) = self.active_estimates.lock() {
-            if let Some(pos) =
-                v.iter().position(|a| a.started == started && a.est_total_ms == est_ms)
-            {
+            if let Some(pos) = v.iter().position(|a| a.ticket.id == ticket.id) {
                 v.swap_remove(pos);
             }
         }
@@ -662,7 +612,10 @@ impl WorkerHandle {
             .lock()
             .map(|v| {
                 v.iter()
-                    .map(|a| (a.est_total_ms - a.started.elapsed().as_secs_f64() * 1000.0).max(0.0))
+                    .map(|a| {
+                        (a.ticket.est_total_ms - a.ticket.start.elapsed().as_secs_f64() * 1000.0)
+                            .max(0.0)
+                    })
                     .sum()
             })
             .unwrap_or(0.0)
@@ -675,7 +628,7 @@ impl WorkerHandle {
             .lock()
             .map(|v| {
                 v.iter().any(|a| {
-                    a.started.elapsed().as_secs_f64() * 1000.0 < a.est_prefill_ms
+                    a.ticket.start.elapsed().as_secs_f64() * 1000.0 < a.ticket.est_prefill_ms
                 })
             })
             .unwrap_or(false)
@@ -977,13 +930,13 @@ impl Router {
                 let est_prefill = w.prefill_cost_ms(req.input_tokens, view.reusable_tokens);
                 let est_total =
                     est_prefill + w.decode_ms_per_tok() * req.output_tokens as f64;
-                let work_start = w.begin_work(est_total, est_prefill);
+                let ticket = w.begin_work(est_total, est_prefill);
                 w.inc_outstanding();
                 w.note_slot_dispatch(req.prefix_hash, req.input_tokens);
                 w.remember_prefix(req.prefix_hash);
                 return SelectOutcome::Decided(RouteDecision {
                     worker: w.clone(),
-                    work_start,
+                    work_start: ticket,
                     est_total_ms: est_total,
                     est_prefill_ms: est_prefill,
                     policy: self.policy,
@@ -1342,15 +1295,20 @@ mod tests {
             ServiceDefaults { fixed_ms: 750.0, prefill_ms_per_tok: 5.35, decode_ms_per_tok: 76.0 },
         );
         // Synthetic runtime: TTFT = 500ms + 10ms/token, varied prompt sizes so
-        // the (fixed, rate) split is identifiable.
+        // the (fixed, rate) split is identifiable. Each observation rides its
+        // own dispatch ticket, as the proxy does for real requests.
         for i in 0..200 {
             let toks = 500 + (i % 7) * 350;
-            w.record_prefill(toks as u64, 500.0 + 10.0 * toks as f64);
+            let t = w.begin_work(1.0, f64::MAX);
+            w.record_prefill(toks as u64, 500.0 + 10.0 * toks as f64, &t);
+            w.end_work(&t);
         }
         assert!((w.prefill_ms_per_tok() - 10.0).abs() < 1.0, "{}", w.prefill_ms_per_tok());
         assert!((w.fixed_overhead_ms() - 500.0).abs() < 400.0, "{}", w.fixed_overhead_ms());
         for _ in 0..200 {
-            w.record_decode(100, 5_000.0); // 50 ms/token
+            let t = w.begin_work(1.0, 0.0); // instantly "decoding"
+            w.record_decode(100, 5_000.0, &t); // 50 ms/token solo
+            w.end_work(&t);
         }
         assert!((w.decode_ms_per_tok() - 50.0).abs() < 0.5, "{}", w.decode_ms_per_tok());
     }
@@ -1406,13 +1364,15 @@ mod tests {
         let w = worker("w");
         let stored = w.begin_work(1234.0, 0.0);
         assert!((w.remaining_work_ms() - 1234.0).abs() < 5.0);
-        // A start Instant that can never match the stored one. (Two
-        // consecutive Instant::now() calls can return the same tick on a
-        // coarse clock, which would "match" and remove the entry — this
-        // test exists to prove non-matching starts are ignored.)
-        let other = stored.checked_sub(std::time::Duration::from_nanos(1)).unwrap();
-        w.end_work(other, 1234.0); // no exact start match → not removed
+        // A ticket id that can never match: ids are unique and monotonic,
+        // so end_work with an unknown ticket is a no-op (the old
+        // Instant-equality matching could collide on same-clock-tick
+        // starts — the ticket exists to make that impossible).
+        let other = DispatchTicket { id: u64::MAX, ..stored };
+        w.end_work(&other);
         assert!(w.remaining_work_ms() > 0.0);
+        w.end_work(&stored);
+        assert!((w.remaining_work_ms()).abs() < 0.001);
     }
 
     #[test]
@@ -1642,9 +1602,9 @@ mod tests {
     fn is_prefilling_tracks_the_prefill_phase() {
         let w = worker("w");
         assert!(!w.is_prefilling());
-        let start = w.begin_work(10_000.0, 9_000.0);
+        let t = w.begin_work(10_000.0, 9_000.0);
         assert!(w.is_prefilling());
-        w.end_work(start, 10_000.0);
+        w.end_work(&t);
         assert!(!w.is_prefilling());
     }
 }

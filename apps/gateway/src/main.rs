@@ -69,6 +69,14 @@
 //! * `PROFILE_FIXED_MS` / `PROFILE_PREFILL_MS_PER_TOK` /
 //!   `PROFILE_DECODE_MS_PER_TOK`  service-model seeds (phase-2 defaults:
 //!   750 / 5.35 / 76)
+//! * `CALIBRATION_DIR`  persistent performance-profile directory
+//!   (`calibration/<machine>/<model>/<runtime>-<n>slots.json`; empty = off)
+//! * `CALIBRATION_MACHINE`  machine key inside `CALIBRATION_DIR` (default
+//!   "local")
+//! * `CALIBRATION_DISABLED`  1 = ignore persistence entirely: seed-only
+//!   behavior (the 4B.2 baseline, for A/B validation)
+//! * `CALIBRATION_SAVE_INTERVAL_S`  periodic save cadence when observations
+//!   changed the profile (default 5, 0 = only on shutdown)
 //! * `OTEL_EXPORTER_OTLP_ENDPOINT`  enables OTLP export (e.g. http://127.0.0.1:4318)
 
 mod admission;
@@ -88,8 +96,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use inference_lab_protocol::ChatCompletionRequest;
 use inference_lab_scheduler::{
-    RequestShape, RouteDecision, Router as WorkerRouter, RouterConfig, SelectOutcome,
-    ServiceDefaults, WorkerHandle,
+    calibration::{CalibrationKey, CalibrationStore, RuntimeCalibration},
+    DispatchTicket, RequestShape, RouteDecision, Router as WorkerRouter, RouterConfig,
+    SelectOutcome, ServiceDefaults, WorkerHandle,
 };
 use inference_lab_worker_lifecycle::{Dimension, FailureReason, WorkerState};
 use metrics::Metrics;
@@ -110,6 +119,17 @@ struct AppState {
     first_token_timeout: Option<Duration>,
     stream_stall_timeout: Option<Duration>,
     lifecycle_cfg: lifecycle::LifecycleConfig,
+    /// One entry per modeled server process: its shared, persisting
+    /// performance calibration (all slot handles of a server share the Arc).
+    calibrations: Vec<ServerCalibration>,
+}
+
+/// A server calibration plus where it persists.
+pub struct ServerCalibration {
+    /// `url#model` identity of the server this calibration models.
+    pub server: String,
+    pub store: Option<CalibrationStore>,
+    pub cal: Arc<RuntimeCalibration>,
 }
 
 fn error_json(status: StatusCode, msg: &str) -> Response {
@@ -433,10 +453,11 @@ async fn chat_completions(
     // one slot before any dispatch registers. This loop consumes the
     // reservation, or replaces it on a re-route.
     let mut worker = decision.worker.clone();
-    let mut reservation = Some((decision.work_start, decision.est_total_ms));
+    let mut reservation: Option<DispatchTicket> = Some(decision.work_start);
 
     let (resp, est_total, work_start, worker_span) = loop {
-        let (work_start, est_total) = reservation.take().expect("reservation held for dispatch");
+        let ticket = reservation.take().expect("reservation held for dispatch");
+        let est_total = ticket.est_total_ms;
         st.metrics
             .scheduler_decisions_total
             .with_label_values(&[st.router.policy().as_str(), &worker.id])
@@ -476,10 +497,10 @@ async fn chat_completions(
             Ok(resp) if resp.status().is_success() => {
                 connect_span.span().set_attribute(KeyValue::new(
                     "inference.connect_ms",
-                    work_start.elapsed().as_secs_f64() * 1000.0,
+                    ticket.start.elapsed().as_secs_f64() * 1000.0,
                 ));
                 connect_span.span().end();
-                break (resp, est_total, work_start, worker_span);
+                break (resp, est_total, ticket, worker_span);
             }
             Ok(resp) => {
                 let status = resp.status();
@@ -491,7 +512,7 @@ async fn chat_completions(
                 let transitions =
                     worker.record_failure(Dimension::Transport, FailureReason::ConnectFailed);
                 st.metrics.record_transitions(&worker, &transitions);
-                worker.end_work(work_start, est_total);
+                worker.end_work(&ticket);
                 let drained = worker.dec_outstanding();
                 st.metrics.record_transitions(&worker, &drained);
                 worker_span.span().set_attribute(KeyValue::new(
@@ -521,7 +542,7 @@ async fn chat_completions(
                 let transitions =
                     worker.record_failure(Dimension::Transport, FailureReason::ConnectFailed);
                 st.metrics.record_transitions(&worker, &transitions);
-                worker.end_work(work_start, est_total);
+                worker.end_work(&ticket);
                 let drained = worker.dec_outstanding();
                 st.metrics.record_transitions(&worker, &drained);
                 worker_span.span().set_attribute(KeyValue::new("inference.outcome", "upstream_error"));
@@ -536,7 +557,7 @@ async fn chat_completions(
                         tracing::warn!(from = %worker.id, to = %d2.worker.id, "connect failure, re-routing");
                         worker = d2.worker.clone();
                         decision = d2;
-                        reservation = Some((decision.work_start, decision.est_total_ms));
+                        reservation = Some(decision.work_start);
                         continue;
                     }
                     _ => {}
@@ -603,7 +624,7 @@ async fn chat_completions(
         first_token_deadline: st.first_token_timeout.map(|t| Instant::now() + t),
         stream_stall_timeout: st.stream_stall_timeout,
         stream_mode,
-        work_estimate: (work_start, est_total),
+        work_estimate: work_start,
         est_total_ms: est_total,
     };
 
@@ -683,6 +704,33 @@ async fn status(State(st): State<Arc<AppState>>) -> Response {
             })
         })
         .collect();
+    let calibration_json: Vec<serde_json::Value> = st
+        .calibrations
+        .iter()
+        .map(|entry| {
+            let p = entry.cal.snapshot_profile();
+            serde_json::json!({
+                "server": entry.server,
+                "loaded_from_store": entry.cal.loaded_from_store(),
+                "store_path": entry.store.as_ref().map(|s| s.path().display().to_string()),
+                "machine": p.machine,
+                "runtime": p.runtime,
+                "model": p.model,
+                "slot_count": p.slot_count,
+                "updated_at_epoch_s": p.updated_at_epoch_s,
+                "prefill": {
+                    "fixed_ms": p.prefill.fixed_ms,
+                    "ms_per_token": p.prefill.ms_per_token,
+                    "samples": p.prefill.samples,
+                    "contention_multiplier": p.prefill.contention_multiplier,
+                    "contention_samples": p.prefill.contention_samples,
+                },
+                "decode_ms_per_token": p.decode.ms_per_token,
+                "decode_samples": p.decode.samples,
+                "buckets": p.bucket_labels,
+            })
+        })
+        .collect();
     Json(serde_json::json!({
         "admission": {
             "enabled": snap.enabled,
@@ -696,6 +744,7 @@ async fn status(State(st): State<Arc<AppState>>) -> Response {
             "load_state": snap.load_state.as_str(),
         },
         "policy": st.router.policy().as_str(),
+        "calibration": calibration_json,
         "workers": workers,
     }))
     .into_response()
@@ -769,6 +818,36 @@ async fn root() -> Response {
         ],
     }))
     .into_response()
+}
+
+/// Periodically persist server calibrations that observations have changed.
+/// A save interval of 0 (or no configured stores) makes this a no-op loop
+/// that only exists to be replaced by the shutdown save.
+async fn calibration_saver(st: Arc<AppState>, interval_s: f64) {
+    if interval_s <= 0.0 || st.calibrations.is_empty() {
+        return;
+    }
+    let mut tick = tokio::time::interval(Duration::from_secs_f64(interval_s.max(1.0)));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        for entry in &st.calibrations {
+            let Some(store) = &entry.store else { continue };
+            if !entry.cal.take_dirty() {
+                continue;
+            }
+            match store.save(&entry.cal.snapshot_profile()) {
+                Ok(()) => {
+                    tracing::debug!(path = %store.path().display(), "calibration saved")
+                }
+                Err(e) => tracing::warn!(
+                    path = %store.path().display(),
+                    error = %e,
+                    "calibration save failed"
+                ),
+            }
+        }
+    }
 }
 
 /// Mirror admission + worker state into gauges every 500 ms so Prometheus
@@ -887,24 +966,84 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(0);
 
+    // Persistent calibration (phase 4B.3): one profile per server process,
+    // keyed by machine × model × runtime × slot count. Loaded at boot so a
+    // restarted gateway starts from measurement instead of seeds; saved
+    // periodically while observations keep improving it.
+    let cal_dir = std::env::var("CALIBRATION_DIR").ok().filter(|s| !s.trim().is_empty());
+    let cal_disabled = std::env::var("CALIBRATION_DISABLED").ok().as_deref() == Some("1");
+    let cal_machine =
+        std::env::var("CALIBRATION_MACHINE").unwrap_or_else(|_| "local".into());
+    let mut calibrations: Vec<ServerCalibration> = Vec::new();
+    if let Some(dir) = cal_dir.filter(|_| !cal_disabled) {
+        let dir = std::path::PathBuf::from(dir);
+        // One calibration per DISTINCT upstream (model+url); several names
+        // pointing at the same server would double-count its streams.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (name, url, model) in parse_workers(&workers_spec) {
+            let server = format!("{url}\u{0}{model}");
+            if !seen.insert(server.clone()) {
+                continue;
+            }
+            let runtime = name.split('-').next().unwrap_or("unknown").to_string();
+            let key = CalibrationKey::new(&cal_machine, &runtime, &model, slot_count);
+            let store = CalibrationStore::new(&dir, &key);
+            let cal = match store.load() {
+                Some(p) => {
+                    tracing::info!(
+                        server = %server.replace('\u{0}', "#"),
+                        path = %store.path().display(),
+                        prefill_ms_per_tok = p.prefill.ms_per_token,
+                        decode = ?p.decode.ms_per_token,
+                        "loaded calibration profile"
+                    );
+                    Arc::new(RuntimeCalibration::from_profile(&p, service_defaults))
+                }
+                None => {
+                    tracing::info!(
+                        server = %server.replace('\u{0}', "#"),
+                        path = %store.path().display(),
+                        "no calibration profile yet — seeding (will persist as it learns)"
+                    );
+                    Arc::new(RuntimeCalibration::from_seeds(
+                        &cal_machine, &runtime, &model, slot_count, service_defaults,
+                    ))
+                }
+            };
+            calibrations.push(ServerCalibration { server: server.replace('\u{0}', "#"), store: Some(store), cal });
+        }
+    }
+
     let mut handles: Vec<Arc<WorkerHandle>> = Vec::new();
     for (name, url, model) in parse_workers(&workers_spec) {
         let runtime = name.split('-').next().unwrap_or("unknown").to_string();
+        // Handles of the same server share one calibration (fall back to a
+        // private one when persistence is off).
+        let server = format!("{url}#{model}");
+        let cal = calibrations
+            .iter()
+            .find(|c| c.server == server)
+            .map(|c| c.cal.clone())
+            .unwrap_or_else(|| {
+                Arc::new(RuntimeCalibration::from_seeds(
+                    &cal_machine, &runtime, &model, slot_count, service_defaults,
+                ))
+            });
         if slot_count > 0 {
             for i in 0..slot_count {
-                let mut h = WorkerHandle::with_defaults(
+                let mut h = WorkerHandle::with_calibration(
                     format!("{name}-slot{i}"),
                     url.clone(),
                     model.clone(),
                     runtime.clone(),
-                    service_defaults,
+                    cal.clone(),
                 );
                 h.slot = Some(i);
                 handles.push(Arc::new(h));
             }
         } else {
-            handles.push(Arc::new(WorkerHandle::with_defaults(
-                name, url, model, runtime, service_defaults,
+            handles.push(Arc::new(WorkerHandle::with_calibration(
+                name, url, model, runtime, cal,
             )));
         }
     }
@@ -950,12 +1089,17 @@ async fn main() -> anyhow::Result<()> {
         stream_stall_timeout: (stream_stall_timeout > 0.0)
             .then(|| Duration::from_secs_f64(stream_stall_timeout)),
         lifecycle_cfg: lifecycle_cfg.clone(),
+        calibrations,
     });
 
     let health_interval = Duration::from_secs_f64(env_f64("HEALTH_INTERVAL_S", 5.0).max(0.5));
     tokio::spawn(gauge_sampler(state.clone()));
     tokio::spawn(lifecycle::transport_poller(state.clone(), health_interval));
     tokio::spawn(lifecycle::functional_prober(state.clone(), lifecycle_cfg));
+    // Persist calibration profiles while the gateway learns (interval 0 =
+    // save only at shutdown — e.g. short benchmark legs).
+    let save_interval = env_f64("CALIBRATION_SAVE_INTERVAL_S", 5.0);
+    tokio::spawn(calibration_saver(state.clone(), save_interval));
 
     let app = Router::new()
         .route("/", get(root))
@@ -966,14 +1110,28 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/admin/workers/{id}/drain", post(drain_worker))
         .route("/admin/workers/{id}/probe", post(probe_worker))
-        .with_state(state);
+        .with_state(state.clone());
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("gateway listening on http://{addr}");
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown({
+            let state = state.clone();
+            async move {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("shutting down");
+            // Final persistence: whatever the last interval missed.
+            for entry in &state.calibrations {
+                if let Some(store) = &entry.store {
+                    if entry.cal.take_dirty() {
+                        match store.save(&entry.cal.snapshot_profile()) {
+                            Ok(()) => tracing::info!(path = %store.path().display(), "calibration saved at shutdown"),
+                            Err(e) => tracing::warn!(path = %store.path().display(), error = %e, "calibration save failed"),
+                        }
+                    }
+                }
+            }
+            }
         })
         .await?;
 
