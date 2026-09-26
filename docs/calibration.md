@@ -114,13 +114,44 @@ measurement.
 - `WORKERS` entries are deduplicated per `url#model` — two names for the
   same server share one calibration (and one stream counter).
 
-## Known limits (deliberate, for 4B.3)
+## Known limits (deliberate, revisited in 4C)
 
-- Bucket classification uses the estimated prefill/decode split
-  (`elapsed` vs `est_prefill_ms`) — a badly wrong estimate can
-  mis-bucket an observation. Buckets are coarse; the error averages out.
+- Bucket classification for prefill observations uses the estimated
+  prefill/decode split (`elapsed` vs `est_prefill_ms`) — a badly wrong
+  estimate can mis-bucket an observation. Buckets are coarse; the error
+  averages out.
 - Decode rate during queue-ahead pricing uses the reservation-time
   bucket, not a time-integrated one.
 - The contention multiplier for a *mixture* of prefill+decode load is
   approximated by the prefill-count bucket alone. Measured mixed-workload
   contention is a phase-4C question.
+
+## Phase 4C: the curves become first-class
+
+4B.3 ended with the contention multiplier **degenerate** (clamped at the
+0.5 floor, no bucket above 1.0 — Metal prefill anti-scaling showed up in
+prediction error, not in the curve) and with a bucketing inconsistency:
+decode observations were bucketed by *decode* peers while pricing counts
+decodes **+ active prefills**, so prefill-contended decodes poisoned
+bucket 1 — the very solo rate admission prices with.
+
+4C fixes the semantics before consuming the curve:
+
+- **Decode observations bucket by total concurrent streams** (decode
+  peers + active prefills), matching pricing. Bucket 1 is again
+  genuinely solo.
+- **The multiplier is a slowdown factor, bounded ≥ 1.0**, and bucket 1
+  is pinned at exactly 1.0 — it *is* the solo definition the other
+  entries are relative to. Sub-1.0 observations (solo-regression drift)
+  record "no measured penalty" instead of inventing negative contention.
+  v1 profiles sanitize on load; `SCHEMA_VERSION` is 2.
+- **`benchmarks/serving_interactions.py --contention-wave`** measures
+  the curves deliberately: controlled simultaneous-prefill levels
+  {1, 2, 4, 8} on identical cold prompts (per-request prefill ms/token
+  AND aggregate prefill tok/s — individual slowdown and aggregate
+  throughput are different numbers), decode scaling per active-stream
+  level, and one live decode stream under {1, 2, 4, 8} injected prefills
+  (ITL p50/p95/p99 + max stall: what prefill work does to an
+  interactive user). The level where aggregate prefill throughput stops
+  rising is the **prefill saturation point** — the curve's job is to
+  make the scheduler refuse exactly that region.

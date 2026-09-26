@@ -42,8 +42,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-/// Bump when the profile layout changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 1;
+/// Bump when the profile layout changes incompatibly. v2 (phase 4C):
+/// contention multipliers are pinned to ≥ 1.0 with bucket 1 fixed at
+/// exactly 1.0 — v1 profiles (which could learn sub-1.0 multipliers and
+/// even a sub-1.0 *solo* bucket) are sanitized on load, not rejected; the
+/// JSON layout is unchanged.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Concurrency buckets for server-side stream counts, in upper-bound order.
 /// Bucket `i` covers `lower[i]..=lower[i+1]-1` (last bucket saturates).
@@ -351,12 +355,14 @@ fn decode_locked(g: &CalibInner, active_streams: usize) -> f64 {
 }
 
 fn contention_locked(g: &CalibInner, active_prefills: usize) -> f64 {
-    bucket_lookup(
-        &g.contention,
-        &g.contention_samples,
-        bucket_index(active_prefills.max(1)),
-        1.0,
-    )
+    let want = bucket_index(active_prefills.max(1));
+    if want == 0 {
+        // Solo IS the definition every multiplier is relative to — it never
+        // inherits a loaded bucket's penalty (that substitution would
+        // over-price every cold arrival on an idle server).
+        return 1.0;
+    }
+    bucket_lookup(&g.contention, &g.contention_samples, want, 1.0)
 }
 
 static SERVER_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -413,6 +419,14 @@ impl RuntimeCalibration {
     /// regression's EWMA moments restart empty — its (fixed, rate) stay at
     /// the adopted values until fresh observations re-identify them.
     pub fn from_profile(profile: &CalibrationProfile, defaults: ServiceDefaults) -> Self {
+        // v1 → v2 semantics: the solo bucket is pinned at 1.0 and no
+        // multiplier may claim contention made prefill faster. Sanitize in
+        // place so pre-upgrade profiles adopt cleanly.
+        let mut contention = profile.prefill.contention_multiplier;
+        contention[0] = 1.0;
+        for m in contention.iter_mut() {
+            *m = m.max(1.0);
+        }
         let inner = CalibInner {
             prefill: OnlineRateModel {
                 fixed: profile.prefill.fixed_ms,
@@ -427,7 +441,7 @@ impl RuntimeCalibration {
             },
             decode: profile.decode.ms_per_token,
             decode_samples: profile.decode.samples,
-            contention: profile.prefill.contention_multiplier,
+            contention,
             contention_samples: profile.prefill.contention_samples,
             seed_decode_ms_per_tok: defaults.decode_ms_per_tok,
             registry: Vec::new(),
@@ -505,6 +519,16 @@ impl RuntimeCalibration {
     /// (the exact one-rate-for-all-loads mistake this module exists to
     /// remove). Loaded observations update their bucket's contention
     /// multiplier against the current solo rate instead.
+    ///
+    /// Contention curve semantics (phase 4C, after the 4B.3 profile came
+    /// out degenerate): the multiplier is a *slowdown* factor — it can only
+    /// be ≥ 1.0, because a second prefill cannot make this one cheaper per
+    /// token. Bucket 1 IS the solo definition, so its multiplier is pinned
+    /// at exactly 1.0 and never updated: a v1 profile that learned 0.5
+    /// there was papering over solo-regression drift, not measuring
+    /// contention curve semantics. Observations below the current solo rate
+    /// estimate record 1.0 (no *measured* penalty) and leave the correction
+    /// to the regression, which owns the solo level.
     pub fn observe_prefill(&self, input_tokens: u64, worker_first_token_ms: f64, ticket: &DispatchTicket) {
         let toks = input_tokens.max(1) as f64;
         let mut g = self.lock();
@@ -513,33 +537,38 @@ impl RuntimeCalibration {
             .iter()
             .filter(|e| e.id != ticket.id && e.started.elapsed().as_secs_f64() * 1000.0 < e.est_prefill_ms)
             .count();
-        let b = bucket_index(peers + 1);
         if peers == 0 {
             g.prefill.observe(toks, worker_first_token_ms);
+            // Bucket 1 stays pinned; the regression is the bucket-1 model.
+            self.dirty.store(true, Ordering::Relaxed);
+            return;
         }
-        // Contention vs the *solo* rate. Clamp guards a transient regression
-        // jump from poisoning the multiplier.
+        // Contention vs the *solo* rate. The clamp band starts at 1.0:
+        // measured ms/token under load below the solo estimate means the
+        // solo estimate drifted high, not that contention sped anything up.
         let ms_per_tok = worker_first_token_ms / toks;
         if g.prefill.rate > 0.1 {
-            let mult_obs = (ms_per_tok / g.prefill.rate).clamp(0.25, 16.0);
-            g.contention[b] = ewma_step(g.contention[b], mult_obs, CONTENTION_ALPHA).clamp(0.5, 16.0);
+            let mult_obs = (ms_per_tok / g.prefill.rate).clamp(1.0, 16.0);
+            let b = bucket_index(peers + 1);
+            g.contention[b] = ewma_step(g.contention[b], mult_obs, CONTENTION_ALPHA).clamp(1.0, 16.0);
             g.contention_samples[b] += 1;
         }
         self.dirty.store(true, Ordering::Relaxed);
     }
 
     /// Feed one decode observation: `decode_ms` spent producing
-    /// `output_tokens` under `bucket(peers + 1)` concurrent decode streams
-    /// (`peers` excludes the observed dispatch itself).
+    /// `output_tokens`. Bucketed by the TOTAL number of concurrent streams
+    /// sharing the server (decode peers and active prefills alike — a
+    /// prefill in flight is stealing this decode's compute right now, and
+    /// pricing already counts it via `decode_rate_for(decodes + prefills)`).
+    /// Bucketing by decode peers only (the 4B.3 behavior) recorded
+    /// prefills-contended decodes into bucket 1 and poisoned the very solo
+    /// rate `decode_rate_solo` hands to admission.
     pub fn observe_decode(&self, output_tokens: u64, decode_ms: f64, ticket: &DispatchTicket) {
         let toks = output_tokens.max(1) as f64;
         let obs = (decode_ms / toks).clamp(1.0, 2_000.0);
         let mut g = self.lock();
-        let peers = g
-            .registry
-            .iter()
-            .filter(|e| e.id != ticket.id && e.started.elapsed().as_secs_f64() * 1000.0 >= e.est_prefill_ms)
-            .count();
+        let peers = g.registry.iter().filter(|e| e.id != ticket.id).count();
         let b = bucket_index(peers + 1);
         g.decode[b] = ewma_step(g.decode[b], obs, DECODE_ALPHA);
         g.decode_samples[b] += 1;
@@ -579,6 +608,23 @@ impl RuntimeCalibration {
     pub fn contention_for(&self, active_prefills: usize) -> f64 {
         let g = self.lock();
         contention_locked(&g, active_prefills)
+    }
+
+    /// The measured prefill contention curve: slowdown multiplier and
+    /// sample count per concurrency bucket (positional over
+    /// [`BUCKET_LABELS`]). Bucket 1 is identically 1.0 — it is what the
+    /// other entries are relative to.
+    pub fn prefill_contention_curve(&self) -> ([f64; 4], [u64; 4]) {
+        let g = self.lock();
+        (g.contention, g.contention_samples)
+    }
+
+    /// The measured decode contention curve: ms/token and sample count per
+    /// TOTAL-concurrent-streams bucket (decode peers + active prefills,
+    /// matching how [`Self::decode_rate_for`] prices).
+    pub fn decode_curve(&self) -> ([f64; 4], [u64; 4]) {
+        let g = self.lock();
+        (g.decode, g.decode_samples)
     }
 
     /// Solo-rate decode ms/token — the "fastest honest path" number the
@@ -761,6 +807,112 @@ mod tests {
         // A solo arrival on an idle server prices at ~solo.
         let solo = c.prefill_ms(8400, 0, 1);
         assert!(solo < 8400.0 * 6.0 * 1.2, "solo prefill {solo} near base rate");
+        // The solo bucket never inherits a loaded bucket's penalty — it is
+        // pinned at exactly 1.0 even though bucket 5-8 has observations.
+        assert_eq!(c.contention_for(1), 1.0);
+        let (curve, samples) = c.prefill_contention_curve();
+        assert_eq!(curve[0], 1.0, "bucket 1 pinned");
+        assert_eq!(samples[0], 0, "solo observations feed the regression, not the curve");
+        assert_eq!(samples[3], 1);
+    }
+
+    #[test]
+    fn contention_never_learns_below_one() {
+        // A loaded observation FASTER per token than the current solo
+        // estimate means the solo estimate drifted high — the curve must
+        // record "no measured penalty" (1.0), not negative contention.
+        let c = cal();
+        let mut t = c.register_dispatch(1000.0, 500.0);
+        for i in 0..60 {
+            let toks = 500 + (i % 7) * 350;
+            c.unregister_dispatch(&t);
+            t = c.register_dispatch(1.0, f64::MAX);
+            c.observe_prefill(toks, 100.0 + 12.0 * toks as f64, &t); // 12 ms/tok solo
+        }
+        let peers: Vec<_> = (0..3).map(|_| c.register_dispatch(1.0, f64::MAX)).collect();
+        c.unregister_dispatch(&t);
+        let tk = c.register_dispatch(1.0, f64::MAX);
+        c.observe_prefill(2000, 2000.0 * 4.0, &tk); // 4 ms/tok under 4-way load
+        let (curve, samples) = c.prefill_contention_curve();
+        assert_eq!(samples[2], 1);
+        assert_eq!(curve[2], 1.0, "sub-solo observation clamps to no-penalty");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        c.observe_prefill(2000, 2000.0 * 20.0, &tk); // 20 ms/tok: real penalty
+        let (curve, _) = c.prefill_contention_curve();
+        assert!(curve[2] > 1.0, "later real penalty still learns: {}", curve[2]);
+        for p in peers {
+            c.unregister_dispatch(&p);
+        }
+        c.unregister_dispatch(&tk);
+    }
+
+    #[test]
+    fn decode_buckets_count_prefills_as_peers() {
+        // 4 dispatches mid-PREFILL, then a decode completes: pricing counts
+        // decode load as decodes + prefills, so the observation must land in
+        // the same bucket the next pricing lookup would read — not in
+        // bucket 1, where it would poison the solo rate.
+        let c = cal();
+        let mut prefills = Vec::new();
+        for _ in 0..4 {
+            prefills.push(c.register_dispatch(600_000.0, f64::MAX));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let t = c.register_dispatch(600_000.0, 1.0); // this one is "decoding"
+        std::thread::sleep(std::time::Duration::from_millis(2)); // past its 1ms prefill window
+        c.observe_decode(64, 64.0 * 300.0, &t);
+        assert_eq!(c.active_prefills(), 4, "the prefill peers are still prefilling");
+        assert_eq!(c.active_decodes(), 1);
+        let (_, samples) = c.decode_curve();
+        assert_eq!(samples, [0, 0, 0, 1], "decode under 5 total streams → bucket 5-8");
+        // ...and the pricing side reads exactly that bucket.
+        assert_eq!(c.decode_rate_for(5), c.decode_curve().0[3]);
+        for p in prefills {
+            c.unregister_dispatch(&p);
+        }
+        c.unregister_dispatch(&t);
+    }
+
+    #[test]
+    fn v1_profiles_adopt_with_sanitized_contention() {
+        // A 4B.3-era profile: sub-1.0 multipliers incl. a 0.5 solo bucket —
+        // the degenerate curve. Adoption must pin the solo bucket and raise
+        // every multiplier to ≥ 1.0 rather than re-seed or reject.
+        let dir = std::env::temp_dir().join(format!("calib-v1-{}", std::process::id()));
+        let key = CalibrationKey::new("apple-m5", "llama-cpp", "m", 8);
+        let store = CalibrationStore::new(&dir, &key);
+        let profile = CalibrationProfile {
+            schema_version: 1,
+            bucket_labels: ["1".into(), "2".into(), "3-4".into(), "5-8".into()],
+            machine: "apple-m5".into(),
+            runtime: "llama-cpp".into(),
+            model: "m".into(),
+            slot_count: 8,
+            updated_at_epoch_s: 0,
+            prefill: PrefillCalibration {
+                fixed_ms: 0.0,
+                ms_per_token: 11.2,
+                samples: 101,
+                contention_multiplier: [0.5, 0.797, 0.5, 1.0],
+                contention_samples: [101, 2, 6, 0],
+            },
+            decode: DecodeCalibration {
+                ms_per_token: [450.0, 1151.0, 1184.0, 1039.0],
+                samples: [20, 15, 28, 46],
+            },
+        };
+        store.save(&profile).unwrap();
+        let adopted = RuntimeCalibration::from_profile(&store.load().unwrap(), defaults());
+        let (curve, samples) = adopted.prefill_contention_curve();
+        assert_eq!(curve, [1.0, 1.0, 1.0, 1.0], "v1 sub-1.0 multipliers sanitize to no-penalty");
+        assert_eq!(adopted.contention_for(1), 1.0);
+        assert_eq!(samples, [101, 2, 6, 0], "sample counts ride along");
+        // The written profile records the new schema version.
+        adopted.observe_decode(32, 32.0 * 500.0, &adopted.register_dispatch(1.0, 1.0));
+        let out = adopted.snapshot_profile();
+        assert_eq!(out.schema_version, SCHEMA_VERSION);
+        assert_eq!(out.prefill.contention_multiplier[0], 1.0);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
