@@ -126,17 +126,20 @@ def parse_labeled_hist(metrics: dict, name: str) -> dict:
         lm = LABEL_RE.search(key)
         if not lm:
             continue
-        labels = dict(
-            part.split("=", 1) for part in lm.group(1).split(",") if "=" in part
-        )
+        labels = {}
+        for part in lm.group(1).split(","):
+            if "=" in part:
+                k, val = part.split("=", 1)
+                labels[k] = val.strip('"')
         combo = (labels.get("prompt", "?"), labels.get("conc", "?"),
                  labels.get("cache", "?"))
         entry = out.setdefault(combo, {"count": 0.0, "sum": 0.0, "buckets": {}})
-        if key.endswith("_count"):
+        base = LABEL_RE.sub("", key)  # suffix lives LEFT of the label brace
+        if base.endswith("_count"):
             entry["count"] = v
-        elif key.endswith("_sum"):
+        elif base.endswith("_sum"):
             entry["sum"] = v
-        elif "_bucket{" in key:
+        elif "_bucket" in base:
             mm = re.search(r'le="([^"]+)"', key)
             if mm:
                 le = float("inf") if mm.group(1) == "+Inf" else float(mm.group(1))
