@@ -105,6 +105,11 @@ def gateway_slot_env(policy: str, model: str, port: int, slots: int) -> dict:
         # slot selection); slot policies model each -np cell separately.
         "WORKER_SLOTS": str(0 if policy == "native" else slots),
         "FIRST_TOKEN_TIMEOUT_S": "900",
+        # A probe queued behind an 8K slot prefill cannot answer in 10 s:
+        # the default timeout false-quarantines busy slots (observed live:
+        # 14 quarantine/recovery generations during one 170 s populate).
+        # 120 s tolerates a slot busy with a full-size prefill.
+        "FUNCTIONAL_PROBE_TIMEOUT_S": "120",
         # Steady-state probes are GPU work (and would evict slot prefixes);
         # keep measured runs quiet.
         "FUNCTIONAL_PROBE_INTERVAL_READY_S": "0",
@@ -161,13 +166,16 @@ num_requests = {n}
 
 
 def warm_slots(gateway_bin: Path, loadgen_bin: Path, leg_dir: Path, model: str,
-               warm_n: int) -> dict:
+               warm_n: int, seeds: list[int] | None = None) -> dict:
     """Populate `warm_n` slots' caches: parallel pinned loadgen one-shots
-    THROUGH the gateway (--pin-slot i), same seed as the measured run so
-    the shared prefix is byte-identical. Slot policies learn the warm
-    topology from these completions (id_slot pin + observed cache_n)."""
+    THROUGH the gateway, same seed as the measured run so the shared
+    prefix is byte-identical. Slot policies learn the warm topology from
+    these completions (id_slot pin + observed cache_n). `seeds` overrides
+    the seed per slot (the two-prefix experiment warms slot0 with A's
+    seed and slot1 with B's)."""
     out_dir = leg_dir / "warm"
     out_dir.mkdir(exist_ok=True)
+    seeds = seeds or [SEED] * warm_n
     procs = []
     t0 = time.time()
     for i in range(warm_n):
@@ -180,7 +188,7 @@ def warm_slots(gateway_bin: Path, loadgen_bin: Path, leg_dir: Path, model: str,
                "--num-requests", "1",
                "--concurrency", "1",
                "--stream", "true",
-               "--seed", str(SEED),
+               "--seed", str(seeds[i]),
                "--pin-slot", str(i),
                "--timeout-s", "900",
                "--out-dir", str(out_dir / f"slot{i}")]
@@ -403,7 +411,9 @@ def two_prefix_experiment(rt, gateway_bin: Path, loadgen_bin: Path,
             record["gateway_at_start"] = wait_gateway_all_ready(8)
 
             sampler.phase = "two-prefix-warm"
-            record["warm"] = warm_slots(gateway_bin, loadgen_bin, leg_dir, model, 2)
+            # slot0 <- prefix A (seed 42), slot1 <- prefix B (seed 43).
+            record["warm"] = warm_slots(gateway_bin, loadgen_bin, leg_dir, model, 2,
+                                        seeds=[42, 43])
 
             sampler.phase = "two-prefix"
             base = dict(input_tokens=SHARED_TOKENS + UNIQUE_TOKENS,
@@ -440,7 +450,8 @@ num_requests = 4
                 procs.append((v, subprocess.Popen(
                     [str(loadgen_bin), "--matrix", str(toml),
                      "--out-dir", str(leg_dir)],
-                    cwd=REPO, capture_output=True, text=True)))
+                    cwd=REPO, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE, text=True)))
             for v, p in procs:
                 out, err = p.communicate()
                 record[f"{v}_exit"] = p.returncode

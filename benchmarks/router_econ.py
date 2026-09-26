@@ -267,9 +267,23 @@ def main() -> int:
         md.append(f"| {l['topology']} | {l['policy']} | {cells} |")
 
     if two:
-        md += ["", "## Two-prefix A/B interleaved (mini multi-tenant cluster)", "",
-               f"Verdict: {two.get('verdict', 'n/a')}; wall {two.get('run_wall_s', '?')} s. "
-               "Per-variant runs live under `two-prefix/` (a-seed 42, b-seed 43)."]
+        md += ["", "## Two-prefix A/B interleaved (mini multi-tenant cluster)", ""]
+        md += ["| Variant | OK | TTFTs (s, by request id) | Reused tok/req | Mean reused |",
+               "|---|---:|---|---:|---:|"]
+        for v in ("a", "b"):
+            files = sorted((args.study_dir / "two-prefix").glob(f"*/two-prefix-{v}.json"))
+            if not files:
+                continue
+            recs = json.loads(files[0].read_text())["records"]
+            tts = [round(r["ttft_ms"] / 1000, 1) for r in sorted(recs, key=lambda r: r["id"])]
+            reuse = [r["reused_tokens"] for r in sorted(recs, key=lambda r: r["id"])]
+            ok = sum(1 for r in recs if r["ok"])
+            md.append(f"| {v} (seed {42 if v == 'a' else 43}) | {ok}/{len(recs)} | {tts} "
+                      f"| {reuse} | {sum(reuse)/max(len(reuse),1):.0f} |")
+        md += ["",
+               "Warm slots: 0←A, 1←B (pinned, own seeds). Affinity = each prefix riding "
+               "its warm slot; spill = a saturated warm slot's traffic rerouted cold "
+               "(attributed bypasses) instead of queueing indefinitely."]
 
     (out_dir / "router-economics.md").write_text("\n".join(md) + "\n")
     (out_dir / "router_econ.json").write_text(json.dumps(
