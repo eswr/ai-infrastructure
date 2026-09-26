@@ -52,7 +52,10 @@ pub const SCHEMA_VERSION: u32 = 2;
 /// Concurrency buckets for server-side stream counts, in upper-bound order.
 /// Bucket `i` covers `lower[i]..=lower[i+1]-1` (last bucket saturates).
 pub const BUCKET_LABELS: [&str; 4] = ["1", "2", "3-4", "5-8"];
-const BUCKET_LOWER: [usize; 4] = [1, 2, 3, 5];
+pub const BUCKET_LOWER: [usize; 4] = [1, 2, 3, 5];
+/// Upper bounds of the measured envelope: the top bucket saturates here,
+/// so counts beyond it have no curve behind them.
+pub const BUCKET_UPPER: [usize; 4] = [1, 2, 4, 8];
 
 /// Index of the bucket an active-stream count falls into.
 pub fn bucket_index(active: usize) -> usize {
@@ -627,6 +630,83 @@ impl RuntimeCalibration {
         (g.decode, g.decode_samples)
     }
 
+    // -- marginal accelerator economics (phase 4C) --------------------------
+    //
+    // The routing cost model answers "what will THIS request cost?" — the
+    // marginal questions below answer the admission/scheduling one: "does
+    // one more concurrent stream make the machine more or less useful?"
+
+    /// Aggregate prefill throughput at `n` concurrent prefills, in units of
+    /// the solo rate: `n / multiplier(n)`. 1.0 = one solo prefill's worth,
+    /// regardless of how many requests share it. Flat curve → factor ≈ n;
+    /// anti-scaling → the factor sags back toward (or below) 1.
+    pub fn prefill_aggregate_factor(&self, n: usize) -> f64 {
+        let n = n.max(1);
+        n as f64 / self.contention_for(n)
+    }
+
+    /// Marginal gain of the (n+1)th prefill: `aggregate(n+1)/aggregate(n)`.
+    /// Above 1.0 the next prefill still adds useful work; at or below 1.0
+    /// the machine has entered its anti-scaling region.
+    pub fn prefill_marginal_gain(&self, n: usize) -> f64 {
+        let n = n.max(1);
+        self.prefill_aggregate_factor(n + 1) / self.prefill_aggregate_factor(n)
+    }
+
+    /// Aggregate decode throughput at `n` concurrent streams, in solo-rate
+    /// units: `n × solo_rate / rate(n)`.
+    pub fn decode_aggregate_factor(&self, n: usize) -> f64 {
+        let n = n.max(1);
+        n as f64 * self.decode_rate_solo() / self.decode_rate_for(n)
+    }
+
+    /// Marginal gain of the (n+1)th decode stream, same shape as
+    /// [`Self::prefill_marginal_gain`].
+    pub fn decode_marginal_gain(&self, n: usize) -> f64 {
+        let n = n.max(1);
+        self.decode_aggregate_factor(n + 1) / self.decode_aggregate_factor(n)
+    }
+
+    /// Marginal gain of entering concurrency bucket `b` (0-based) from
+    /// below — the cross-bucket marginal the curve's resolution can
+    /// actually answer. Bucket 0 is the baseline (1.0). These are the
+    /// numbers the contention gauges and the saturation analysis read.
+    pub fn marginal_gain_entering_bucket(&self, bucket: usize, decode: bool) -> f64 {
+        if bucket == 0 {
+            return 1.0;
+        }
+        let n = BUCKET_LOWER[bucket];
+        if decode {
+            self.decode_aggregate_factor(n) / self.decode_aggregate_factor(n - 1)
+        } else {
+            self.prefill_aggregate_factor(n) / self.prefill_aggregate_factor(n - 1)
+        }
+    }
+
+    /// The contention gate predicate: would ONE more concurrent prefill
+    /// still raise aggregate prefill throughput on the measured curve?
+    ///
+    /// Compared bucket-to-bucket — bucket boundaries are where the curve
+    /// has data, so arrivals *inside* a bucket are allowed and the gate
+    /// acts exactly where a measured aggregate drop shows up. Past the
+    /// measured envelope (top bucket, 8 streams) it queues: more prefills
+    /// than that have no measured defense and queue at the runtime anyway.
+    pub fn prefill_marginal_pays(&self, active_prefills: usize) -> bool {
+        let active = active_prefills.max(0);
+        if active == 0 {
+            return true; // an idle machine gains by definition
+        }
+        if active >= BUCKET_UPPER[3] {
+            return false; // beyond the measured envelope
+        }
+        let cur = bucket_index(active);
+        let nxt = bucket_index(active + 1);
+        if nxt == cur {
+            return true; // within-bucket marginal is unmeasured: allow
+        }
+        self.prefill_aggregate_factor(active + 1) > self.prefill_aggregate_factor(active)
+    }
+
     /// Solo-rate decode ms/token — the "fastest honest path" number the
     /// admission controller and legacy formulas price with. Strictly solo:
     /// the measured bucket-1 rate, or the physical seed if bucket 1 has no
@@ -874,8 +954,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_profiles_adopt_with_sanitized_contention() {
-        // A 4B.3-era profile: sub-1.0 multipliers incl. a 0.5 solo bucket —
+    fn v1_profiles_adopt_with_sanitized_contention() {        // A 4B.3-era profile: sub-1.0 multipliers incl. a 0.5 solo bucket —
         // the degenerate curve. Adoption must pin the solo bucket and raise
         // every multiplier to ≥ 1.0 rather than re-seed or reject.
         let dir = std::env::temp_dir().join(format!("calib-v1-{}", std::process::id()));
@@ -958,5 +1037,84 @@ mod tests {
         assert!((adopted.decode_rate_for(8) - 68.75).abs() < 0.01,
             "adopted profile drives bucket predictions");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A calibration carrying the hypothesized anti-scaling curve (m =
+    /// 1 / individual speed): solo 1.0, two-way 1.43, four-way 2.86,
+    /// eight-way 8.33 — aggregate factors ≈ 1.00 / 1.40 / 1.05 / 0.60.
+    fn anti_scaling_cal() -> RuntimeCalibration {
+        let profile = CalibrationProfile {
+            schema_version: SCHEMA_VERSION,
+            bucket_labels: ["1".into(), "2".into(), "3-4".into(), "5-8".into()],
+            machine: "apple-m5".into(),
+            runtime: "llama-cpp".into(),
+            model: "m".into(),
+            slot_count: 8,
+            updated_at_epoch_s: 0,
+            prefill: PrefillCalibration {
+                fixed_ms: 0.0,
+                ms_per_token: 6.2,
+                samples: 40,
+                contention_multiplier: [1.0, 1.43, 2.86, 8.33],
+                contention_samples: [40, 4, 8, 8],
+            },
+            decode: DecodeCalibration {
+                ms_per_token: [450.0, 1200.0, 1200.0, 1200.0],
+                samples: [10, 4, 6, 8],
+            },
+        };
+        RuntimeCalibration::from_profile(&profile, defaults())
+    }
+
+    #[test]
+    fn marginal_gain_reads_the_measured_curve() {
+        let c = anti_scaling_cal();
+        // Aggregate factors: 1/1.0=1.00, 2/1.43≈1.40, 3/2.86≈1.05, 5/8.33≈0.60.
+        assert!((c.prefill_aggregate_factor(1) - 1.0).abs() < 0.01);
+        assert!((c.prefill_aggregate_factor(2) - 1.399).abs() < 0.01);
+        assert!((c.prefill_aggregate_factor(3) - 1.049).abs() < 0.01);
+        assert!((c.prefill_aggregate_factor(5) - 0.600).abs() < 0.01);
+        // The two-way join pays (1.40/1.00 > 1); the third does not
+        // (1.05/1.40 < 1) — the saturation point, read off the curve.
+        assert!(c.prefill_marginal_gain(1) > 1.0);
+        assert!(c.prefill_marginal_gain(2) < 1.0);
+        // Bucket-entry gains: same numbers, bucket resolution.
+        assert!(c.marginal_gain_entering_bucket(1, false) > 1.0);
+        assert!(c.marginal_gain_entering_bucket(2, false) < 1.0);
+        // Decode curve: loaded rates 2-2.7x solo → marginal gains < 1 from
+        // the second stream on.
+        assert!(c.decode_marginal_gain(1) < 1.0);
+        assert!((c.marginal_gain_entering_bucket(0, true) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn marginal_gate_refuses_only_the_measured_anti_scaling_region() {
+        let c = anti_scaling_cal();
+        // 0 and 1 → 2 pay (2/1.43 = 1.40 > 1.00).
+        assert!(c.prefill_marginal_pays(0));
+        assert!(c.prefill_marginal_pays(1));
+        // 2 → 3 crosses into bucket 3-4: 1.05 < 1.40 — the gate holds.
+        assert!(!c.prefill_marginal_pays(2));
+        // 3 → 4 stays inside the bucket: unmeasured marginal, allowed.
+        assert!(c.prefill_marginal_pays(3));
+        // 4 → 5 crosses into 5-8: 0.60 < 1.40 — held again.
+        assert!(!c.prefill_marginal_pays(4));
+        // 5..7 stay inside the top bucket: allowed.
+        assert!(c.prefill_marginal_pays(5));
+        assert!(c.prefill_marginal_pays(7));
+        // 8 is the measured envelope: a ninth prefill queues.
+        assert!(!c.prefill_marginal_pays(8));
+        assert!(!c.prefill_marginal_pays(12));
+    }
+
+    #[test]
+    fn marginal_gate_on_a_flat_curve_never_holds_before_the_envelope() {
+        // No measured contention anywhere: every join pays until the
+        // envelope. This is the "don't hold on an idle-fast machine" guard.
+        let c = cal();
+        for active in 0..8 {
+            assert!(c.prefill_marginal_pays(active), "active={active}");
+        }
+        assert!(!c.prefill_marginal_pays(8));
     }
 }

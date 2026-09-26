@@ -83,6 +83,7 @@ pub mod calibration;
 pub use calibration::{
     bucket_index, bucket_label, CalibrationKey, CalibrationProfile, CalibrationStore,
     DispatchTicket, DecodeCalibration, PrefillCalibration, RuntimeCalibration, BUCKET_LABELS,
+    BUCKET_LOWER, BUCKET_UPPER,
 };
 
 /// Clamp band for each parameter; observations outside it are noise (or a
@@ -255,6 +256,13 @@ pub struct CandidateView {
     /// + this request (everything prefilling now will be decoding then).
     pub prefill_bucket: &'static str,
     pub decode_bucket: &'static str,
+    /// Marginal gain of this request's prefill joining at the current
+    /// server load: aggregate prefill throughput after / before. Below
+    /// 1.0 means this arrival pushes the machine into its measured
+    /// anti-scaling region (the contention gate's hold signal).
+    pub prefill_marginal_gain: f64,
+    /// Same ratio for the decode stream this request would join.
+    pub decode_marginal_gain: f64,
 }
 
 /// Why a routing decision landed where it landed.
@@ -1079,6 +1087,19 @@ impl Router {
                 let prefill = cal.prefill_ms(req.input_tokens, reusable, active_prefills + 1);
                 let decode = cal.decode_rate_for(decode_load) * req.output_tokens as f64;
                 let remaining = w.remaining_work_ms();
+                // The marginal question for THIS join: does aggregate
+                // throughput rise (gain > 1) or does this arrival push a
+                // full machine past its measured anti-scaling knee?
+                let prefill_gain = if active_prefills == 0 {
+                    1.0
+                } else {
+                    cal.prefill_marginal_gain(active_prefills)
+                };
+                let decode_gain = if active_decodes + active_prefills == 0 {
+                    1.0
+                } else {
+                    cal.decode_marginal_gain(active_decodes + active_prefills)
+                };
                 CandidateView {
                     worker_id: w.id.clone(),
                     slot: w.slot,
@@ -1092,6 +1113,8 @@ impl Router {
                     cache_savings_ms: raw_reusable as f64 * w.prefill_ms_per_tok(),
                     prefill_bucket: bucket_label(active_prefills + 1),
                     decode_bucket: bucket_label(decode_load),
+                    prefill_marginal_gain: prefill_gain,
+                    decode_marginal_gain: decode_gain,
                 }
             })
             .collect()

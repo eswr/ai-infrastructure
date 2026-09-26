@@ -171,6 +171,10 @@ fn record_decision(
         attrs.push(KeyValue::new("scheduler.cache_savings_ms", v.cache_savings_ms));
         attrs.push(KeyValue::new("scheduler.cache_match_tokens", v.reusable_tokens as i64));
         attrs.push(KeyValue::new("scheduler.cache_state_chosen", v.cache_state.as_str()));
+        attrs.push(KeyValue::new("scheduler.prefill_bucket", v.prefill_bucket));
+        attrs.push(KeyValue::new("scheduler.decode_bucket", v.decode_bucket));
+        attrs.push(KeyValue::new("scheduler.prefill_marginal_gain", v.prefill_marginal_gain));
+        attrs.push(KeyValue::new("scheduler.decode_marginal_gain", v.decode_marginal_gain));
     }
     if let Some(b) = &d.bypass {
         attrs.push(KeyValue::new("scheduler.bypass_reason", b.reason));
@@ -239,11 +243,13 @@ fn record_decision(
             .map(|v| {
                 let label = v.slot.map(|s| s.to_string()).unwrap_or_else(|| v.worker_id.clone());
                 format!(
-                    "{label}:est_ttft={:.1}s,q={:.1}s,saved={:.1}s,match={}tok",
+                    "{label}:est_ttft={:.1}s,q={:.1}s,saved={:.1}s,match={}tok,pf={}/{:.2}",
                     v.estimated_ttft_ms / 1000.0,
                     v.remaining_work_ms / 1000.0,
                     v.cache_savings_ms / 1000.0,
-                    v.reusable_tokens
+                    v.reusable_tokens,
+                    v.prefill_bucket,
+                    v.prefill_marginal_gain,
                 )
             })
             .collect::<Vec<_>>()
@@ -719,6 +725,20 @@ async fn status(State(st): State<Arc<AppState>>) -> Response {
         .iter()
         .map(|entry| {
             let p = entry.cal.snapshot_profile();
+            let agg_pf: Vec<f64> = inference_lab_scheduler::BUCKET_LOWER
+                .iter()
+                .map(|n| entry.cal.prefill_aggregate_factor(*n))
+                .collect();
+            let agg_dec: Vec<f64> = inference_lab_scheduler::BUCKET_LOWER
+                .iter()
+                .map(|n| entry.cal.decode_aggregate_factor(*n))
+                .collect();
+            let gain_pf: Vec<f64> = (0..4)
+                .map(|b| entry.cal.marginal_gain_entering_bucket(b, false))
+                .collect();
+            let gain_dec: Vec<f64> = (0..4)
+                .map(|b| entry.cal.marginal_gain_entering_bucket(b, true))
+                .collect();
             serde_json::json!({
                 "server": entry.server,
                 "loaded_from_store": entry.cal.loaded_from_store(),
@@ -738,6 +758,15 @@ async fn status(State(st): State<Arc<AppState>>) -> Response {
                 "decode_ms_per_token": p.decode.ms_per_token,
                 "decode_samples": p.decode.samples,
                 "buckets": p.bucket_labels,
+                "marginal": {
+                    "prefill_aggregate_factor": agg_pf,
+                    "decode_aggregate_factor": agg_dec,
+                    "prefill_gain_entering_bucket": gain_pf,
+                    "decode_gain_entering_bucket": gain_dec,
+                    "gate_would_admit": (0..9)
+                        .map(|n| entry.cal.prefill_marginal_pays(n))
+                        .collect::<Vec<bool>>(),
+                },
             })
         })
         .collect();
@@ -904,6 +933,27 @@ async fn gauge_sampler(st: Arc<AppState>) {
                 m.scheduler_calibration_samples
                     .with_label_values(&["prefill_contention", b])
                     .set(p.prefill.contention_samples[i] as i64);
+                // The 4C contention curves: aggregate throughput shape,
+                // decode slowdown vs solo, and the marginal gain of
+                // entering each bucket (what the contention gate reads).
+                let n = inference_lab_scheduler::BUCKET_LOWER[i];
+                m.scheduler_prefill_aggregate_factor
+                    .with_label_values(&[b])
+                    .set(cal.prefill_aggregate_factor(n));
+                m.scheduler_decode_aggregate_factor
+                    .with_label_values(&[b])
+                    .set(cal.decode_aggregate_factor(n));
+                m.scheduler_marginal_prefill_gain
+                    .with_label_values(&[b])
+                    .set(cal.marginal_gain_entering_bucket(i, false));
+                m.scheduler_marginal_decode_gain
+                    .with_label_values(&[b])
+                    .set(cal.marginal_gain_entering_bucket(i, true));
+                if p.decode.samples[0] > 0 && p.decode.ms_per_token[0] > 0.0 {
+                    m.scheduler_decode_slowdown_factor
+                        .with_label_values(&[b])
+                        .set(p.decode.ms_per_token[i] / p.decode.ms_per_token[0]);
+                }
             }
             m.scheduler_calibration_samples
                 .with_label_values(&["prefill_regression", "solo"])

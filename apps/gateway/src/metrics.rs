@@ -119,6 +119,20 @@ pub struct Metrics {
     pub scheduler_decode_ms_per_token: prometheus::GaugeVec,
     /// Calibrated prefill contention multiplier per active-prefill bucket.
     pub scheduler_prefill_contention_multiplier: prometheus::GaugeVec,
+    /// Aggregate prefill throughput per concurrency bucket in solo-rate
+    /// units (n / multiplier(n)): the curve's shape. The level where this
+    /// stops rising is the measured prefill saturation point.
+    pub scheduler_prefill_aggregate_factor: prometheus::GaugeVec,
+    /// Aggregate decode throughput per bucket in solo-rate units.
+    pub scheduler_decode_aggregate_factor: prometheus::GaugeVec,
+    /// Loaded decode ms/token relative to the solo bucket: the decode
+    /// slowdown curve (1.0 = uncontended).
+    pub scheduler_decode_slowdown_factor: prometheus::GaugeVec,
+    /// Marginal gain of entering each concurrency bucket (aggregate
+    /// throughput after/before). Below 1.0 = the measured anti-scaling
+    /// region the contention gate holds arrivals out of.
+    pub scheduler_marginal_prefill_gain: prometheus::GaugeVec,
+    pub scheduler_marginal_decode_gain: prometheus::GaugeVec,
     /// Observation counts behind the calibration: kind = decode |
     /// prefill_contention | prefill_regression, bucket = "1".."5-8"|"solo".
     pub scheduler_calibration_samples: IntGaugeVec,
@@ -398,6 +412,29 @@ impl Metrics {
             ),
             &["bucket"],
         )?;
+        let curve_gauge = |name: &str, help: &str| -> anyhow::Result<prometheus::GaugeVec> {
+            Ok(prometheus::GaugeVec::new(Opts::new(name, help), &["bucket"])?)
+        };
+        let scheduler_prefill_aggregate_factor = curve_gauge(
+            "scheduler_prefill_aggregate_factor",
+            "Aggregate prefill throughput per bucket in solo-rate units (saturation curve)",
+        )?;
+        let scheduler_decode_aggregate_factor = curve_gauge(
+            "scheduler_decode_aggregate_factor",
+            "Aggregate decode throughput per bucket in solo-rate units",
+        )?;
+        let scheduler_decode_slowdown_factor = curve_gauge(
+            "scheduler_decode_slowdown_factor",
+            "Loaded decode ms/token relative to the solo bucket (1.0 = uncontended)",
+        )?;
+        let scheduler_marginal_prefill_gain = curve_gauge(
+            "scheduler_marginal_prefill_gain",
+            "Marginal gain of entering each prefill bucket (below 1.0 = anti-scaling region)",
+        )?;
+        let scheduler_marginal_decode_gain = curve_gauge(
+            "scheduler_marginal_decode_gain",
+            "Marginal gain of entering each decode bucket",
+        )?;
         let scheduler_calibration_samples = IntGaugeVec::new(
             Opts::new(
                 "scheduler_calibration_samples",
@@ -410,6 +447,11 @@ impl Metrics {
         for b in inference_lab_scheduler::BUCKET_LABELS {
             scheduler_decode_ms_per_token.with_label_values(&[b]).set(0.0);
             scheduler_prefill_contention_multiplier.with_label_values(&[b]).set(1.0);
+            scheduler_decode_slowdown_factor.with_label_values(&[b]).set(1.0);
+            scheduler_prefill_aggregate_factor.with_label_values(&[b]).set(0.0);
+            scheduler_decode_aggregate_factor.with_label_values(&[b]).set(0.0);
+            scheduler_marginal_prefill_gain.with_label_values(&[b]).set(1.0);
+            scheduler_marginal_decode_gain.with_label_values(&[b]).set(1.0);
             scheduler_calibration_samples.with_label_values(&["decode", b]);
             scheduler_calibration_samples.with_label_values(&["prefill_contention", b]);
         }
@@ -593,6 +635,11 @@ impl Metrics {
         reg!(registry, inference_active_decodes);
         reg!(registry, scheduler_decode_ms_per_token);
         reg!(registry, scheduler_prefill_contention_multiplier);
+        reg!(registry, scheduler_prefill_aggregate_factor);
+        reg!(registry, scheduler_decode_aggregate_factor);
+        reg!(registry, scheduler_decode_slowdown_factor);
+        reg!(registry, scheduler_marginal_prefill_gain);
+        reg!(registry, scheduler_marginal_decode_gain);
         reg!(registry, scheduler_calibration_samples);
         reg!(registry, worker_state);
         reg!(registry, worker_state_transitions_total);
@@ -655,6 +702,11 @@ impl Metrics {
             inference_active_decodes,
             scheduler_decode_ms_per_token,
             scheduler_prefill_contention_multiplier,
+            scheduler_prefill_aggregate_factor,
+            scheduler_decode_aggregate_factor,
+            scheduler_decode_slowdown_factor,
+            scheduler_marginal_prefill_gain,
+            scheduler_marginal_decode_gain,
             scheduler_calibration_samples,
             worker_state,
             worker_state_transitions_total,
