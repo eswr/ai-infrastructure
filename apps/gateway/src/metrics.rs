@@ -226,6 +226,17 @@ pub struct Metrics {
     pub discovery_workers: IntGauge,
     /// Registry changes by action: added | removed | updated.
     pub discovery_events_total: IntCounterVec,
+
+    // -- fleet simulation (phase 6) ---------------------------------------------
+    /// Placement refusals BEFORE dispatch by reason: insufficient_memory |
+    /// accelerator_mismatch | no_tensor_parallel_group | node_not_placable |
+    /// cordoned_new_placement | no_estimate. The scheduler saying "no" is
+    /// the feature.
+    pub placement_rejections_total: IntCounterVec,
+    /// Node lifecycle, one-hot per state — the fleet timeline panel.
+    pub fleet_node_state: IntGaugeVec,
+    /// Every node lifecycle edge (phase 6D/6E audit trail).
+    pub fleet_node_transitions_total: IntCounterVec,
 }
 
 impl Metrics {
@@ -687,6 +698,37 @@ impl Metrics {
             discovery_events_total.with_label_values(&[action]);
         }
 
+        let placement_rejections_total = IntCounterVec::new(
+            Opts::new(
+                "inference_placement_rejections_total",
+                "Candidates refused by the placement gate before dispatch",
+            ),
+            &["reason"],
+        )?;
+        for reason in [
+            "no_capability",
+            "insufficient_memory",
+            "accelerator_mismatch",
+            "no_tensor_parallel_group",
+            "node_not_placable",
+            "cordoned_new_placement",
+            "no_estimate",
+        ] {
+            placement_rejections_total.with_label_values(&[reason]);
+        }
+        let fleet_node_state = gauge_vec(
+            "fleet_node_state",
+            "Node lifecycle state, 1 on the current state (simulated fleet)",
+            &["node", "state"],
+        )?;
+        let fleet_node_transitions_total = IntCounterVec::new(
+            Opts::new(
+                "fleet_node_transitions_total",
+                "Node lifecycle transitions (simulated fleet)",
+            ),
+            &["node", "from", "to", "kind"],
+        )?;
+
         reg!(registry, requests_total);
         reg!(registry, requests_in_flight);
         reg!(registry, input_tokens_total);
@@ -760,6 +802,9 @@ impl Metrics {
         reg!(registry, worker_in_service);
         reg!(registry, discovery_workers);
         reg!(registry, discovery_events_total);
+        reg!(registry, placement_rejections_total);
+        reg!(registry, fleet_node_state);
+        reg!(registry, fleet_node_transitions_total);
 
         Ok(Self {
             registry,
@@ -836,6 +881,9 @@ impl Metrics {
             worker_in_service,
             discovery_workers,
             discovery_events_total,
+            placement_rejections_total,
+            fleet_node_state,
+            fleet_node_transitions_total,
         })
     }
 

@@ -37,6 +37,13 @@ use std::time::Duration;
 pub const LABEL_WORKER: &str = "inference-lab.io/worker";
 pub const LABEL_RUNTIME: &str = "inference-lab.io/runtime";
 pub const LABEL_MODEL: &str = "inference-lab.io/model";
+// Phase 6A: heterogeneous-fleet capability labels. The label set IS the
+// worker's registration — the gateway infers nothing it was not told.
+pub const LABEL_NODE: &str = "inference-lab.io/node";
+pub const LABEL_ACCELERATOR: &str = "inference-lab.io/accelerator";
+pub const LABEL_VRAM_GB: &str = "inference-lab.io/vram-gb";
+pub const LABEL_GPU_UUID: &str = "inference-lab.io/gpu-uuid";
+pub const LABEL_TP_GROUP: &str = "inference-lab.io/tp-group";
 
 const SA_DIR: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
 
@@ -209,6 +216,11 @@ struct Discovered {
     endpoint: String,
     runtime: String,
     model: String,
+    node: Option<String>,
+    accelerator: Option<String>,
+    vram_gb: Option<f64>,
+    gpu_uuid: Option<String>,
+    tp_group: Option<String>,
 }
 
 pub async fn discovery_loop(st: Arc<AppState>, cfg: DiscoveryConfig) {
@@ -300,11 +312,24 @@ async fn sync(
             .as_str()
             .unwrap_or("default")
             .to_string();
-        let port = service_ports.get(name).copied().unwrap_or(cfg.port);
-        desired.insert(
-            name.to_string(),
-            Discovered { endpoint: format!("http://{ip}:{port}"), runtime, model },
-        );
+        let gpu_uuid = labels[LABEL_GPU_UUID]
+            .as_str()
+            .map(|s| s.to_string())
+            .or_else(|| pod["metadata"]["uid"].as_str().map(|s| s.to_string()));
+        let d = Discovered {
+            endpoint: format!(
+                "http://{ip}:{port}",
+                port = service_ports.get(name).copied().unwrap_or(cfg.port)
+            ),
+            runtime,
+            model,
+            node: labels[LABEL_NODE].as_str().map(|s| s.to_string()),
+            accelerator: labels[LABEL_ACCELERATOR].as_str().map(|s| s.to_string()),
+            vram_gb: labels[LABEL_VRAM_GB].as_str().and_then(|v| v.parse().ok()),
+            gpu_uuid,
+            tp_group: labels[LABEL_TP_GROUP].as_str().map(|s| s.to_string()),
+        };
+        desired.insert(name.to_string(), d);
     }
 
     let current = st.router.workers();
@@ -375,6 +400,7 @@ fn arr(v: &Value) -> Vec<&Value> {
 /// Calibration resolution for a discovered worker: reuse a matching server
 /// calibration when one exists (external/native workers share it), else a
 /// per-(runtime, model) seed-based model grown on demand.
+#[allow(clippy::too_many_arguments)]
 fn build_handle(st: &Arc<AppState>, id: &str, d: &Discovered) -> Option<Arc<WorkerHandle>> {
     let cal = st
         .calibrations
@@ -398,13 +424,19 @@ fn build_handle(st: &Arc<AppState>, id: &str, d: &Discovered) -> Option<Arc<Work
                 })
                 .clone()
         });
-    Some(Arc::new(WorkerHandle::with_calibration(
+    let mut handle = WorkerHandle::with_calibration(
         id,
         d.endpoint.clone(),
         d.model.clone(),
         d.runtime.clone(),
         cal,
-    )))
+    );
+    handle.node_id = d.node.clone();
+    handle.accelerator = d.accelerator.clone();
+    handle.vram_gb = d.vram_gb;
+    handle.gpu_uuid = d.gpu_uuid.clone();
+    handle.tp_group = d.tp_group.clone();
+    Some(Arc::new(handle))
 }
 
 #[cfg(test)]

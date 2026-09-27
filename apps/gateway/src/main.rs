@@ -101,6 +101,7 @@
 
 mod admission;
 mod discovery;
+mod fleet;
 mod lifecycle;
 mod metrics;
 mod proxy;
@@ -121,6 +122,20 @@ use inference_lab_scheduler::{
     DispatchTicket, RequestShape, RouteDecision, Router as WorkerRouter, RouterConfig,
     SelectOutcome, ServiceClass, ServiceDefaults, WorkerHandle,
 };
+
+/// One statically-configured worker (WORKERS / EXTERNAL_WORKERS) with its
+/// optional fleet capabilities (phase 6A): `name=url#model;k=v;...`.
+#[derive(Debug, Clone)]
+pub struct WorkerSpec {
+    pub name: String,
+    pub url: String,
+    pub model: String,
+    pub node: Option<String>,
+    pub accelerator: Option<String>,
+    pub vram_gb: Option<f64>,
+    pub gpu_uuid: Option<String>,
+    pub tp_group: Option<String>,
+}
 use inference_lab_worker_lifecycle::{Dimension, FailureReason, WorkerState};
 use metrics::Metrics;
 use opentelemetry::trace::{SpanKind, TraceContextExt};
@@ -146,6 +161,8 @@ struct AppState {
     /// Kubernetes discovery: the Service-endpoint membership snapshot plus
     /// lazily-grown calibrations for dynamically discovered workers.
     discovery: Arc<discovery::DiscoveryState>,
+    /// Simulated-fleet node lifecycle states (phase 6D).
+    nodes: Arc<fleet::NodeTable>,
     dyn_cals: std::sync::Mutex<std::collections::HashMap<String, Arc<RuntimeCalibration>>>,
     cal_machine: String,
     service_defaults: ServiceDefaults,
@@ -503,9 +520,11 @@ async fn chat_completions(
     // otherwise the router picks — for slot policies that is a slot.
     let shape = RequestShape {
         prefix_hash: hash,
+        model: model.clone(),
         input_tokens: est_in,
         output_tokens: out_tok,
         pinned_slot: req.id_slot,
+        placement: req.placement.clone(),
         service_class,
     };
     let sel_span = telemetry::child_span(&root, "scheduler.select", SpanKind::Internal, vec![]);
@@ -519,7 +538,7 @@ async fn chat_completions(
     let mut gate_holds: u64 = 0;
     let mut gate_held = Duration::ZERO;
     let mut decision = loop {
-        match st.router.select_reserved(shape) {
+        match st.router.select_reserved(shape.clone()) {
             SelectOutcome::Decided(d) => break d,
             SelectOutcome::AllUnhealthy => {
                 sel_span.span().end();
@@ -527,6 +546,23 @@ async fn chat_completions(
                 root.span().set_attribute(KeyValue::new("inference.outcome", "no_worker"));
                 root.span().end();
                 return error_json(StatusCode::SERVICE_UNAVAILABLE, "no healthy workers");
+            }
+            SelectOutcome::Unschedulable { label, detail } => {
+                // Phase 6C: the placement gate refused the request BEFORE
+                // dispatch — the scheduler saying "no" is the feature.
+                sel_span.span().end();
+                st.metrics
+                    .placement_rejections_total
+                    .with_label_values(&[label])
+                    .inc();
+                st.metrics.requests_total.with_label_values(&["rejected"]).inc();
+                root.span().set_attribute(KeyValue::new("inference.outcome", "unschedulable"));
+                root.span().set_attribute(KeyValue::new("placement.reject_reason", label));
+                root.span().end();
+                return error_json(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    &format!("no placement possible ({label}): {detail}"),
+                );
             }
             SelectOutcome::Held { active_prefills, marginal_gain } => {
                 gate_holds += 1;
@@ -566,8 +602,17 @@ async fn chat_completions(
                         held_s = gate_held.as_secs_f64(),
                         "contention gate: hold cap exceeded, dispatching anyway"
                     );
-                    match st.router.select_reserved_forced(shape) {
+                    match st.router.select_reserved_forced(shape.clone()) {
                         SelectOutcome::Decided(d) => break d,
+                        SelectOutcome::Unschedulable { .. } => {
+                            sel_span.span().end();
+                            st.metrics.requests_total.with_label_values(&["no_worker"]).inc();
+                            root.span().end();
+                            return error_json(
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "no healthy workers after gate spill",
+                            );
+                        }
                         _ => {
                             sel_span.span().end();
                             st.metrics.requests_total.with_label_values(&["no_worker"]).inc();
@@ -697,7 +742,7 @@ async fn chat_completions(
                 connect_span.span().end();
                 // Re-route once if another healthy candidate exists —
                 // reservation included, so the retry prices itself in.
-                match st.router.select_reserved(shape) {
+                match st.router.select_reserved(shape.clone()) {
                     SelectOutcome::Decided(d2) if d2.worker.id != worker.id => {
                         record_decision(&st, &root, None, &d2, shape.prefix_hash);
                         tracing::warn!(from = %worker.id, to = %d2.worker.id, "connect failure, re-routing");
@@ -842,6 +887,20 @@ async fn status(State(st): State<Arc<AppState>>) -> Response {
                     .map(|t| t.elapsed().as_secs_f64()),
                 "outstanding": w.outstanding(),
                 "in_service": st.discovery.in_service(&w.id),
+                "node": w.node_id.clone(),
+                "node_state": w.node_state_label(),
+                "placement_gate": match w.node_gate() {
+                    g if g == inference_lab_scheduler::NODE_GATE_OPEN => "open",
+                    g if g == inference_lab_scheduler::NODE_GATE_RESIDENT_ONLY => "resident_only",
+                    _ => "closed",
+                },
+                "gpu": w.accelerator.as_ref().map(|a| serde_json::json!({
+                    "accelerator": a,
+                    "vram_gb": w.vram_gb,
+                    "uuid": w.gpu_uuid.clone(),
+                    "tp_group": w.tp_group,
+                    "loaded_model": w.loaded_model_label(),
+                })),
                 "prefill_ms_per_token": w.prefill_ms_per_tok(),
                 "fixed_overhead_ms": w.fixed_overhead_ms(),
                 "decode_ms_per_token": w.decode_ms_per_tok(),
@@ -940,6 +999,20 @@ async fn status(State(st): State<Arc<AppState>>) -> Response {
         "policy": st.router.policy().as_str(),
         "calibration": calibration_json,
         "workers": workers,
+        "nodes": st
+            .nodes
+            .snapshot()
+            .into_iter()
+            .map(|(id, state, total)| {
+                serde_json::json!({
+                    "id": id,
+                    "state": state.as_str(),
+                    "allows_new_placements": state.allows_new_placements(),
+                    "serves_traffic": state.serves_traffic(),
+                    "transitions_total": total,
+                })
+            })
+            .collect::<Vec<_>>(),
     }))
     .into_response()
 }
@@ -962,6 +1035,24 @@ async fn drain_worker(State(st): State<Arc<AppState>>, Path(id): Path<String>) -
         "outstanding": w.outstanding(),
     }))
     .into_response()
+}
+
+/// Node lifecycle admin (phase 6D): cordon | uncordon | drain |
+/// maintenance | return | fail | recover. `drain` drains the node's
+/// workers through the existing phase-4D path; everything else drives the
+/// node state machine in the fleet controller.
+async fn admin_node_action(
+    State(st): State<Arc<AppState>>,
+    Path((id, action)): Path<(String, String)>,
+) -> Response {
+    match fleet::admin_action(&st, &id, &action) {
+        Ok((state, transition)) => Json(serde_json::json!({
+            "node": id, "action": action, "state": state.as_str(),
+            "transition": transition,
+        }))
+        .into_response(),
+        Err(e) => error_json(StatusCode::CONFLICT, &e),
+    }
 }
 
 /// The Kubernetes readiness contract (phase 5): the gateway's lifecycle
@@ -1050,7 +1141,7 @@ async fn root() -> Response {
         "endpoints": [
             "/v1/chat/completions", "/v1/models", "/healthz", "/status", "/metrics",
             "/admin/workers/{id}/drain", "/admin/workers/{id}/probe",
-            "/admin/workers/{id}/readiness"
+            "/admin/workers/{id}/readiness", "/admin/nodes/{id}/{action}"
         ],
     }))
     .into_response()
@@ -1219,18 +1310,42 @@ async fn gauge_sampler(st: Arc<AppState>) {
 // Setup
 // ---------------------------------------------------------------------------
 
-fn parse_workers(spec: &str) -> Vec<(String, String, String)> {
-    // spec: "name=url[,name=url...]" with optional "#model" suffix:
-    // "mlx=http://127.0.0.1:8082#mlx-community/Qwen3.5-9B-4bit"
+fn parse_workers(spec: &str) -> Vec<WorkerSpec> {
+    // spec: "name=url[,name=url...]" with optional "#model" suffix and
+    // phase-6A capability params: "mlx=http://127.0.0.1:8082#model;accelerator=apple-m5;vram_gb=24"
     spec.split(',')
         .filter(|s| !s.trim().is_empty())
         .map(|pair| {
             let (name, rest) = pair.split_once('=').unwrap_or(("worker", pair));
-            let (url, model) = match rest.split_once('#') {
+            let (url, tail) = match rest.split_once('#') {
                 Some((u, m)) => (u, m.to_string()),
                 None => (rest, "default".to_string()),
             };
-            (name.trim().to_string(), url.trim().to_string(), model)
+            let mut tail_parts = tail.split(';');
+            let model = tail_parts.next().unwrap_or("default").to_string();
+            let mut spec = WorkerSpec {
+                name: name.trim().to_string(),
+                url: url.trim().to_string(),
+                model,
+                node: None,
+                accelerator: None,
+                vram_gb: None,
+                gpu_uuid: None,
+                tp_group: None,
+            };
+            for param in tail_parts {
+                if let Some((k, v)) = param.split_once('=') {
+                    match k.trim() {
+                        "node" => spec.node = Some(v.to_string()),
+                        "accelerator" => spec.accelerator = Some(v.to_string()),
+                        "vram_gb" => spec.vram_gb = v.trim().parse().ok(),
+                        "gpu_uuid" => spec.gpu_uuid = Some(v.to_string()),
+                        "tp_group" => spec.tp_group = Some(v.to_string()),
+                        _ => {}
+                    }
+                }
+            }
+            spec
         })
         .collect()
 }
@@ -1297,7 +1412,7 @@ async fn main() -> anyhow::Result<()> {
         // One calibration per DISTINCT upstream (model+url); several names
         // pointing at the same server would double-count its streams.
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for (name, url, model) in parse_workers(&static_spec) {
+        for WorkerSpec { name, url, model, .. } in parse_workers(&static_spec) {
             let server = format!("{url}\u{0}{model}");
             if !seen.insert(server.clone()) {
                 continue;
@@ -1332,7 +1447,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut handles: Vec<Arc<WorkerHandle>> = Vec::new();
-    for (name, url, model) in parse_workers(&static_spec) {
+    for WorkerSpec { name, url, model, node, accelerator, vram_gb, gpu_uuid, tp_group } in
+        parse_workers(&static_spec)
+    {
         let runtime = name.split('-').next().unwrap_or("unknown").to_string();
         // Handles of the same server share one calibration (fall back to a
         // private one when persistence is off).
@@ -1356,12 +1473,21 @@ async fn main() -> anyhow::Result<()> {
                     cal.clone(),
                 );
                 h.slot = Some(i);
+                h.node_id = node.clone();
+                h.accelerator = accelerator.clone();
+                h.vram_gb = vram_gb;
+                h.gpu_uuid = gpu_uuid.clone();
+                h.tp_group = tp_group.clone();
                 handles.push(Arc::new(h));
             }
         } else {
-            handles.push(Arc::new(WorkerHandle::with_calibration(
-                name, url, model, runtime, cal,
-            )));
+            let mut h = WorkerHandle::with_calibration(name, url, model, runtime, cal);
+            h.node_id = node;
+            h.accelerator = accelerator;
+            h.vram_gb = vram_gb;
+            h.gpu_uuid = gpu_uuid;
+            h.tp_group = tp_group;
+            handles.push(Arc::new(h));
         }
     }
 
@@ -1435,6 +1561,7 @@ async fn main() -> anyhow::Result<()> {
         lifecycle_cfg: lifecycle_cfg.clone(),
         calibrations,
         discovery: Arc::new(discovery::DiscoveryState::default()),
+        nodes: Arc::new(fleet::NodeTable::default()),
         dyn_cals: std::sync::Mutex::new(std::collections::HashMap::new()),
         cal_machine: cal_machine.clone(),
         service_defaults,
@@ -1445,6 +1572,7 @@ async fn main() -> anyhow::Result<()> {
     if discovery_enabled {
         tokio::spawn(discovery::discovery_loop(state.clone(), discovery_cfg));
     }
+    tokio::spawn(fleet::fleet_loop(state.clone(), fleet::FleetConfig::from_env()));
     let health_interval = Duration::from_secs_f64(env_f64("HEALTH_INTERVAL_S", 5.0).max(0.5));
     tokio::spawn(gauge_sampler(state.clone()));
     tokio::spawn(lifecycle::transport_poller(state.clone(), health_interval));
@@ -1464,6 +1592,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/workers/{id}/drain", post(drain_worker))
         .route("/admin/workers/{id}/probe", post(probe_worker))
         .route("/admin/workers/{id}/readiness", get(worker_readiness))
+        .route("/admin/nodes/{id}/{action}", post(admin_node_action))
         .with_state(state.clone());
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
