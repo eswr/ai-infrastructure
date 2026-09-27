@@ -11,7 +11,7 @@ MOCK_IMAGE ?= inference-lab/mock-worker:phase5
         experiment-prefix-router experiment-serving-interactions \
         worker-mlx worker-llama worker-vllm worker-mock gateway \
         up down obs-logs k8s k8s-images k8s-up k8s-deploy k8s-render k8s-check k8s-demo k8s-bridge-check \
-        k8s-status k8s-down
+        fleet-check k8s-status k8s-down slurm-up slurm-demo slurm-down
 
 setup:            ## fresh-checkout bootstrap: toolchain checks + workspace build
 	@command -v cargo >/dev/null 2>&1 || { echo "ERROR: rust not found — install via https://rustup.rs"; exit 1; }
@@ -120,6 +120,8 @@ k8s: k8s-status  ## alias: kubectl get pods -n inference-lab (the demo view)
 k8s-images:      ## build gateway + mock-worker container images
 	docker build -f deploy/k8s/images/gateway/Dockerfile -t $(GATEWAY_IMAGE) .
 	docker build -f deploy/k8s/images/mock-worker/Dockerfile -t $(MOCK_IMAGE) workers/mock-gpu
+	docker build -q -f deploy/k8s/images/mock-dcgm/Dockerfile -t inference-lab/mock-dcgm:phase6 deploy/k8s/images/mock-dcgm >/dev/null
+	k3d image import inference-lab/mock-dcgm:phase6 -c $(K3D_CLUSTER) 2>/dev/null || true
 
 k8s-render:      ## render manifests (inject host.docker.internal IP + scaler script)
 	bash deploy/k8s/render.sh
@@ -141,6 +143,9 @@ k8s-deploy: k8s-render ## re-apply manifests to an existing cluster
 k8s-check:       ## the six short k8s acceptance scenarios (minutes, mock workers only)
 	python3 benchmarks/k8s/run_k8s_check.py
 
+fleet-check:     ## phase-6 acceptance: heterogeneous fleet, placement, node lifecycle, simulated failures
+	python3 benchmarks/k8s/run_fleet_check.py
+
 k8s-demo:        ## the six-beat phase-5 demo (pods, autoscale, wedge, recover, drain, bridge) — under 5 min
 	python3 benchmarks/k8s/run_demo.py
 
@@ -152,3 +157,20 @@ k8s-status:
 
 k8s-down:
 	k3d cluster delete $(K3D_CLUSTER)
+
+# ------------------------------------------------------------- slurm lab --
+# Phase 6: the batch/HPC side of the datacenter story, on FAKE GPUs.
+# Kubernetes = online serving; Slurm = queued batch. Vocabulary, not
+# accelerators: sinfo/squeue/sbatch/srun/GRES/drain/resume.
+
+slurm-up:         ## build + start the local Slurm lab (1 ctl + 2 nodes, fake A100 GRES)
+	docker compose -f deploy/slurm/docker-compose.yml up -d --build
+	@echo "waiting for node registration..."
+	@sleep 6
+	docker compose -f deploy/slurm/docker-compose.yml exec -T slurmctl sinfo
+
+slurm-demo:       ## the Slurm vocabulary exercises (sbatch --gres, squeue, drain/resume)
+	bash experiments/slurm/exercises.sh
+
+slurm-down:
+	docker compose -f deploy/slurm/docker-compose.yml down -v

@@ -11,6 +11,10 @@ ports:
   - port: "8080:30080"
     nodeFilters:
       - loadbalancer
+  # mock-dcgm exporter (phase 6B) for the host Prometheus scrape.
+  - port: "9400:30081"
+    nodeFilters:
+      - loadbalancer
 options:
   k3s:
     extraArgs:

@@ -19,11 +19,17 @@ for f in k8s/base/*.yaml; do
   sed "s/__HOST_IP__/${HOST_IP}/g" "${f}" > "k8s/rendered/$(basename "${f}")"
 done
 
-# Inline scaler.py into the ConfigMap (4-space indent = valid YAML block).
+# Inline scaler.py + mock_dcgm.py into their ConfigMaps (4-space indent =
+# valid YAML block scalar).
 python3 - <<EOF
-script = open("k8s/scaler.py").read()
-cm = open("k8s/rendered/30-scaler.yaml").read()
-open("k8s/rendered/30-scaler.yaml", "w").write(cm.replace("__SCALER_SCRIPT__", "\n".join("    " + l if l.strip() else "" for l in script.splitlines())))
+def inline(cm_path, placeholder, script_path):
+    script = open(script_path).read()
+    cm = open(cm_path).read()
+    indented = "\n".join("    " + l if l.strip() else "" for l in script.splitlines())
+    open(cm_path, "w").write(cm.replace(placeholder, indented))
+
+inline("k8s/rendered/30-scaler.yaml", "__SCALER_SCRIPT__", "k8s/scaler.py")
+inline("k8s/rendered/40-dcgm.yaml", "__DCGM_SCRIPT__", "k8s/images/mock-dcgm/mock_dcgm.py")
 EOF
 
 echo "rendered deploy/k8s/rendered (host.docker.internal -> ${HOST_IP})"

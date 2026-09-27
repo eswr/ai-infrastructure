@@ -88,6 +88,42 @@ nodePort 30080) — the observability compose stack's existing Prometheus job
 | rolling replacement preserves active stream | pod deleted mid-stream; stream completes, 0 client errors |
 | autoscaler adds mock capacity under queue pressure | queue signal → replicas up; idle cooldown → back down |
 
+## Phase 6: datacenter control-plane simulation
+
+On top of the phase-5 stack, the cluster now simulates a heterogeneous GPU
+fleet — explicitly labeled as simulation everywhere (every DCGM-shaped
+series carries `simulation="true"`; the README scope note separates
+measured from simulated):
+
+* **6A heterogeneous fleet** (`50-fleet.yaml`): three nodes — 2×H100
+  (tp-group `tg-h100-01`), 1×L40S, 1×A10 — registered purely through pod
+  labels (`inference-lab.io/node|accelerator|vram-gb|tp-group|gpu-uuid`).
+  The native M5 joins via `EXTERNAL_WORKERS;accelerator=apple-m5;vram_gb=24`.
+* **6C placement gate** (`crates/scheduler/src/placement.rs`): requests
+  carry `placement` requirements (`model_memory_gb` overrides, `context_length`,
+  `tensor_parallel_size`, `accelerator`). The gateway estimates
+  `weights + KV(context) + overhead` with a safety margin and refuses
+  impossible placements BEFORE dispatch (HTTP 422 +
+  `inference_placement_rejections_total`): 70B-fp16 fits nowhere
+  single-GPU, fits TP-2 on the H100 pair; 70B-q4 never lands on the A10;
+  a 400K-context request blows every VRAM budget on KV alone. Residency is
+  tracked: an already-loaded model skips the weights term. Capability-less
+  workers (the generic phase-5 pool) refuse placement requests — you cannot
+  claim a fit you cannot verify.
+* **6B mock DCGM** (`deploy/k8s/images/mock-dcgm/`, scraped by the
+  observability Prometheus as job `dcgm-sim`, dashboard
+  `gpu-fleet-simulation.json`): DCGM_FI_* metric names and label shapes,
+  inventory derived from the gateway /status, admin injections
+  (`/inject/xid|thermal|oom|clear`).
+* **6D node lifecycle** (`crates/worker-lifecycle/src/node.rs`,
+  gateway `fleet.rs`): PROVISIONING → READY → CORDONED → DRAINING →
+  MAINTENANCE → RECOVERING, FAILED — above the worker machines. Admin:
+  `POST /admin/nodes/{id}/{action}`; states drive per-worker PLACEMENT
+  GATES (READY open, CORDONED resident-only, rest closed).
+* **6E failure exercises** (`make fleet-check`): XID 48 → node FAILED →
+  drain → replacement → validation; thermal → cordon + DEGRADED with
+  traffic continuing; OOM → immediate worker quarantine → probe recovery.
+
 ## Gotchas (all found live)
 
 * `$(POD_NAME)` does NOT expand in probe `httpGet.path` — readiness must be
@@ -100,3 +136,9 @@ nodePort 30080) — the observability compose stack's existing Prometheus job
   snapshot path; its `--model` default is addressed as `default_model`.
 * `estimated_queue_seconds` is queued-work-based: no admission budgets, no
   signal. `ADMIT_MAX_ACTIVE_OUTPUT_TOKENS` gives the mock pool a real one.
+* DCGM FB_USED is MiB; capabilities are GB — normalize before comparing
+  (a raw MiB-vs-GB compare quarantined the whole fleet on the first scrape).
+* k3d port mappings are fixed at cluster creation — adding a nodePort means
+  recreating the cluster (or kubectl port-forward).
+* Deployment `spec.selector` must match template label KEYS exactly
+  (`inference-lab.io/node`, not `node`).

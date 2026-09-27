@@ -1,0 +1,190 @@
+# The heterogeneous simulated fleet (phase 6A): three GPU "nodes" with
+# different accelerator classes, plus the native M5 worker bridged via
+# EXTERNAL_WORKERS (gateway env, see 10-gateway.yaml / render.sh).
+#
+# The pod LABELS are the worker registration the gateway discovers:
+#   node / accelerator / vram-gb / tp-group — the placement gate's inputs.
+# Two H100 workers share tp-group=tg-h100-01: they are the TP-2 pair for
+# 70B-class placements (simulated: dispatch lands on the first rank; the
+# mock runtime does not actually parallel-compute — documented in the
+# README scope note).
+#
+# Pod plumbing is identical to the phase-5 mock workers: gateway-driven
+# readiness (/readyz), preStop /drain, graceful termination.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fleet-node-gpu-01
+  namespace: inference-lab
+  labels: {app: fleet, node: node-gpu-01}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: mock-worker, "inference-lab.io/node": node-gpu-01}
+  template:
+    metadata:
+      labels:
+        app: mock-worker
+        inference-lab.io/worker: "true"
+        inference-lab.io/runtime: vllm
+        inference-lab.io/model: mock-gpu
+        inference-lab.io/node: node-gpu-01
+        inference-lab.io/accelerator: nvidia-h100
+        inference-lab.io/vram-gb: "80"
+        inference-lab.io/tp-group: tg-h100-01
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: worker
+          image: inference-lab/mock-worker:phase5
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: MODEL_NAME, value: mock-gpu}
+            - {name: GATEWAY_URL, value: http://gateway.inference-lab.svc.cluster.local}
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+          ports: [{containerPort: 8080, name: http}]
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 2
+            failureThreshold: 2
+            timeoutSeconds: 4
+            initialDelaySeconds: 1
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 6
+          lifecycle:
+            preStop:
+              httpGet: {path: /drain, port: http}
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-gpu-01
+  namespace: inference-lab
+  labels: {inference-lab.io/worker: "true"}
+spec:
+  selector: {app: mock-worker, node: node-gpu-01}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fleet-node-gpu-02
+  namespace: inference-lab
+  labels: {app: fleet, node: node-gpu-02}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: mock-worker, "inference-lab.io/node": node-gpu-02}
+  template:
+    metadata:
+      labels:
+        app: mock-worker
+        inference-lab.io/worker: "true"
+        inference-lab.io/runtime: vllm
+        inference-lab.io/model: mock-gpu
+        inference-lab.io/node: node-gpu-02
+        inference-lab.io/accelerator: nvidia-l40s
+        inference-lab.io/vram-gb: "48"
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: worker
+          image: inference-lab/mock-worker:phase5
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: MODEL_NAME, value: mock-gpu}
+            - {name: GATEWAY_URL, value: http://gateway.inference-lab.svc.cluster.local}
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+          ports: [{containerPort: 8080, name: http}]
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 2
+            failureThreshold: 2
+            timeoutSeconds: 4
+            initialDelaySeconds: 1
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 6
+          lifecycle:
+            preStop:
+              httpGet: {path: /drain, port: http}
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-gpu-02
+  namespace: inference-lab
+  labels: {inference-lab.io/worker: "true"}
+spec:
+  selector: {app: mock-worker, node: node-gpu-02}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fleet-node-gpu-03
+  namespace: inference-lab
+  labels: {app: fleet, node: node-gpu-03}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: mock-worker, "inference-lab.io/node": node-gpu-03}
+  template:
+    metadata:
+      labels:
+        app: mock-worker
+        inference-lab.io/worker: "true"
+        inference-lab.io/runtime: vllm
+        inference-lab.io/model: mock-gpu
+        inference-lab.io/node: node-gpu-03
+        inference-lab.io/accelerator: nvidia-a10
+        inference-lab.io/vram-gb: "24"
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: worker
+          image: inference-lab/mock-worker:phase5
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: MODEL_NAME, value: mock-gpu}
+            - {name: GATEWAY_URL, value: http://gateway.inference-lab.svc.cluster.local}
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+          ports: [{containerPort: 8080, name: http}]
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 2
+            failureThreshold: 2
+            timeoutSeconds: 4
+            initialDelaySeconds: 1
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 6
+          lifecycle:
+            preStop:
+              httpGet: {path: /drain, port: http}
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-gpu-03
+  namespace: inference-lab
+  labels: {inference-lab.io/worker: "true"}
+spec:
+  selector: {app: mock-worker, node: node-gpu-03}
+  ports: [{name: http, port: 80, targetPort: http}]

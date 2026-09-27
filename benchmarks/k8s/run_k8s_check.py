@@ -140,9 +140,17 @@ def scale(n: int) -> None:
     kubectl("scale", "deploy", "mock-workers", f"--replicas={n}")
 
 
+FLEET_DEPLOYMENTS = ["fleet-node-gpu-01", "fleet-node-gpu-02", "fleet-node-gpu-03"]
+
+
 def hard_reset() -> None:
     """Fresh worker pool: delete every mock pod (drops drained/wedged
-    state), let the Deployment rebuild, wait for a clean registry."""
+    state), let the Deployment rebuild, wait for a clean registry. The
+    phase-6 fleet Deployments are PARKED (replicas 0): this suite's
+    assertions assume exactly the 2-replica phase-5 pool. `make fleet-check`
+    brings the fleet back."""
+    for d in FLEET_DEPLOYMENTS:
+        kubectl("scale", "deploy", d, "--replicas=0")
     kubectl("delete", "pods", "-l", "app=mock-worker", "--wait=false")
     scale(2)
     wait_registry_ready(2)

@@ -45,6 +45,11 @@ spec:
               value: "3"
             - name: WORKER_DISCOVERY_POLL_S
               value: "1"
+            # Phase 6E: the fleet controller reacts to DCGM-shaped telemetry
+            # from the mock exporter (XID -> node FAILED, thermal -> cordon,
+            # FB full -> worker OOM). All of it simulation="true".
+            - name: FLEET_DCGM_URL
+              value: http://mock-dcgm.inference-lab.svc.cluster.local:9400/metrics
             - name: INTERACTIVE_SLO_TTFT_S
               value: "5"
             # Admission ON with mock-scaled budgets: the queue-signal
