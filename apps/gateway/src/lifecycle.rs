@@ -82,8 +82,10 @@ pub fn probe_payload(model: &str, max_tokens: u32) -> serde_json::Value {
 /// Judge a probe answer. Acceptance, in order:
 /// HTTP success ∧ parseable completion payload ∧ `completion_tokens > 0`
 /// ∧ non-empty output. Anything less is a specific failure, not "unhealthy".
-/// Thinking models (Qwen3.5) spend their first tokens on reasoning —
-/// `message.reasoning_content` is real generated output and counts.
+/// Thinking models spend their first tokens on reasoning, and every runtime
+/// names that field differently — real generated output counts wherever it
+/// appears: `message.reasoning_content` (llama.cpp), `message.reasoning`
+/// (mlx-lm 0.31), `message.content` (everything standard).
 pub fn judge_probe(http_ok: bool, status: u16, body: &str) -> HealthObservation {
     if !http_ok {
         return HealthObservation::failed(Dimension::Functional, FailureReason::MalformedResponse)
@@ -93,11 +95,11 @@ pub fn judge_probe(http_ok: bool, status: u16, body: &str) -> HealthObservation 
         return HealthObservation::failed(Dimension::Functional, FailureReason::MalformedResponse)
             .with_detail("body is not a JSON completion");
     };
-    let content = v["choices"][0]["message"]["content"]
+    let message = &v["choices"][0]["message"];
+    let content = message["content"].as_str().unwrap_or_default();
+    let reasoning = message["reasoning_content"]
         .as_str()
-        .unwrap_or_default();
-    let reasoning = v["choices"][0]["message"]["reasoning_content"]
-        .as_str()
+        .or_else(|| message["reasoning"].as_str())
         .unwrap_or_default();
     // usage is the honest token count; a runtime that omits it gets judged
     // on its words instead.
@@ -179,7 +181,7 @@ pub async fn functional_prober(st: std::sync::Arc<AppState>, cfg: LifecycleConfi
                 continue;
             }
             last_probe.insert(w.id.clone(), Instant::now());
-            let (obs, dur) = run_functional_probe(&st.client, w, &cfg).await;
+            let (obs, dur) = run_functional_probe(&st.client, &w, &cfg).await;
             st.metrics
                 .worker_functional_probe_seconds
                 .with_label_values(&[w.id.as_str()])
@@ -194,7 +196,7 @@ pub async fn functional_prober(st: std::sync::Arc<AppState>, cfg: LifecycleConfi
                     .inc();
             }
             let transitions = w.observe(&obs);
-            st.metrics.record_transitions(w, &transitions);
+            st.metrics.record_transitions(&w, &transitions);
         }
     }
 }
@@ -216,7 +218,7 @@ pub async fn transport_poller(st: std::sync::Arc<AppState>, interval: Duration) 
                 Err(_) => HealthObservation::failed(Dimension::Transport, FailureReason::ConnectFailed),
             };
             let transitions = w.observe(&obs);
-            st.metrics.record_transitions(w, &transitions);
+            st.metrics.record_transitions(&w, &transitions);
         }
     }
 }
@@ -239,6 +241,11 @@ mod tests {
         // That is a healthy generation and must pass the READY gate.
         let reasoning = r#"{"choices":[{"message":{"role":"assistant","content":"","reasoning_content":"Thinking Process"}}],"usage":{"prompt_tokens":14,"completion_tokens":2}}"#;
         assert!(judge_probe(true, 200, reasoning).ok);
+
+        // mlx-lm 0.31 names the same field `reasoning` (found live by the
+        // k3d bridge check: gen-15 quarantine loop on MalformedResponse).
+        let mlx_reasoning = r#"{"choices":[{"message":{"role":"assistant","reasoning":"Thinking Process"}}],"usage":{"prompt_tokens":14,"completion_tokens":2}}"#;
+        assert!(judge_probe(true, 200, mlx_reasoning).ok);
     }
 
     #[test]
