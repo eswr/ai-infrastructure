@@ -1,0 +1,94 @@
+# The gateway Deployment + Service. All worker traffic flows through here;
+# workers are discovered from pods/endpoints (WORKER_DISCOVERY=kubernetes).
+#
+# hostAliases: host.docker.internal is how in-cluster pods reach the NATIVE
+# macOS worker (Metal/llama.cpp/MLX stay outside k3d — never force Metal into
+# Linux containers). render.sh injects the Docker Desktop host IP at deploy
+# time. The alias is harmless when no external worker is configured.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: inference-lab
+  labels: {app: gateway}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: gateway}
+  template:
+    metadata:
+      labels: {app: gateway}
+    spec:
+      serviceAccountName: inference-lab
+      terminationGracePeriodSeconds: 20
+      hostAliases:
+        - ip: __HOST_IP__
+          hostnames: [host.docker.internal]
+      containers:
+        - name: gateway
+          image: inference-lab/gateway:phase5
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: WORKER_DISCOVERY
+              value: kubernetes
+            - name: ROUTE_POLICY
+              value: lor
+            # Fast lab cadences: discovery-poll-level probe reaction so
+            # `make k8s-check` scenarios finish in seconds, not minutes.
+            - name: HEALTH_INTERVAL_S
+              value: "1"
+            - name: FUNCTIONAL_PROBE_INTERVAL_S
+              value: "1"
+            - name: FUNCTIONAL_PROBE_INTERVAL_READY_S
+              value: "5"
+            - name: FUNCTIONAL_PROBE_TIMEOUT_S
+              value: "3"
+            - name: WORKER_DISCOVERY_POLL_S
+              value: "1"
+            - name: INTERACTIVE_SLO_TTFT_S
+              value: "5"
+            # Admission ON with mock-scaled budgets: the queue-signal
+            # surface (estimated_queue_seconds, queued_work) only exists
+            # when admission tracks active/queued work. 4096 output tokens
+            # = 8 concurrent 512-token mock requests; pressure beyond that
+            # queues, and the queue is what the autoscaler reads.
+            - name: ADMIT_MAX_ACTIVE_OUTPUT_TOKENS
+              value: "4096"
+            # Mock-scale service-model seeds (the phase-2 defaults price a
+            # 9B Metal model; mock workers are ~1000x cheaper per token).
+            - name: PROFILE_FIXED_MS
+              value: "25"
+            - name: PROFILE_PREFILL_MS_PER_TOK
+              value: "0.1"
+            - name: PROFILE_DECODE_MS_PER_TOK
+              value: "5"
+            - name: RUST_LOG
+              value: info
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+            failureThreshold: 5
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: inference-lab
+spec:
+  type: NodePort
+  selector: {app: gateway}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 30080

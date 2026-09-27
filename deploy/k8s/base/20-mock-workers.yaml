@@ -1,0 +1,91 @@
+# Mock workers: the pods that kubernetes discovery registers as workers.
+#
+# The pod LABELS are the worker registration (runtime/model capabilities) —
+# the gateway reads them, there is no hard-coded worker list anywhere.
+#
+# Readiness mapping (phase 5): the pod's readinessProbe hits the worker's
+# own /readyz, which is the conjunction of a REAL functional generation and
+# the GATEWAY's lifecycle verdict for this pod (READY/DEGRADED -> routable).
+# The lifecycle controller stays authoritative; /health == 200 is never a
+# readiness signal. A wedged worker (answers /health, cannot generate) is
+# NotReady in kubernetes within seconds.
+#
+# Graceful draining: the preStop hook calls the worker's /drain; the worker
+# refuses new work, finishes active streams, and exits when active == 0
+# (kubernetes enforces terminationGracePeriodSeconds).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-workers
+  namespace: inference-lab
+  labels: {app: mock-workers}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: mock-worker}
+  template:
+    metadata:
+      labels:
+        app: mock-worker
+        inference-lab.io/worker: "true"
+        inference-lab.io/runtime: mock
+        inference-lab.io/model: mock-gpu
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: worker
+          image: inference-lab/mock-worker:phase5
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODEL_NAME
+              value: mock-gpu
+            # Generous token cap so high max_tokens pressure requests are
+            # real work (the gateway's estimator prices them accordingly).
+            - name: MAX_OUTPUT
+              value: "512"
+            - name: DRAIN_MAX_S
+              value: "45"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # /readyz consults the gateway's lifecycle verdict for this pod.
+            - name: GATEWAY_URL
+              value: http://gateway.inference-lab.svc.cluster.local
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            # /readyz = real generation + gateway lifecycle verdict
+            # (gateway-authoritative; see file header).
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 2
+            failureThreshold: 2
+            timeoutSeconds: 4
+            initialDelaySeconds: 1
+          livenessProbe:
+            # Liveness stays process-health: /health. A draining or wedged
+            # pod must NOT be liveness-killed — draining especially.
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 6
+          lifecycle:
+            preStop:
+              httpGet: {path: /drain, port: http}
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-workers
+  namespace: inference-lab
+  labels:
+    inference-lab.io/worker: "true"
+spec:
+  selector: {app: mock-worker}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

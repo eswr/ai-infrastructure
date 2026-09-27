@@ -1,12 +1,17 @@
 SHELL := /bin/bash
 SCENARIO ?= smoke
 MATRIX ?= mlx-prompt-concurrency
+K3D_CLUSTER ?= inference-lab
+K8S_NAMESPACE ?= inference-lab
+GATEWAY_IMAGE ?= inference-lab/gateway:phase5
+MOCK_IMAGE ?= inference-lab/mock-worker:phase5
 
 .PHONY: setup build build-release test fmt clippy bench matrix analyze failcheck lifecycle-check \
         experiment-admission-saturation experiment-cross-runtime experiment-prefix-cache \
         experiment-prefix-router experiment-serving-interactions \
         worker-mlx worker-llama worker-vllm worker-mock gateway \
-        up down obs-logs k8s
+        up down obs-logs k8s k8s-images k8s-up k8s-deploy k8s-render k8s-check k8s-bridge-check \
+        k8s-status k8s-down
 
 setup:            ## fresh-checkout bootstrap: toolchain checks + workspace build
 	@command -v cargo >/dev/null 2>&1 || { echo "ERROR: rust not found — install via https://rustup.rs"; exit 1; }
@@ -104,3 +109,43 @@ down:
 
 obs-logs:
 	docker compose -f deploy/compose/docker-compose.yml logs -f --tail=50
+
+# ------------------------------------------------------- k3d operations --
+# Phase 5: the control plane under Kubernetes. Gateway + mock workers in
+# k3d; the real Metal worker stays native on macOS (EXTERNAL_WORKERS via
+# host.docker.internal). Every default here completes in minutes.
+
+k8s: k8s-status  ## alias: kubectl get pods -n inference-lab (the demo view)
+
+k8s-images:      ## build gateway + mock-worker container images
+	docker build -f deploy/k8s/images/gateway/Dockerfile -t $(GATEWAY_IMAGE) .
+	docker build -f deploy/k8s/images/mock-worker/Dockerfile -t $(MOCK_IMAGE) workers/mock-gpu
+
+k8s-render:      ## render manifests (inject host.docker.internal IP + scaler script)
+	bash deploy/k8s/render.sh
+
+k8s-up: k8s-images k8s-render ## create the k3d cluster, import images, deploy the stack
+	@k3d cluster get $(K3D_CLUSTER) >/dev/null 2>&1 || k3d cluster create $(K3D_CLUSTER) --config deploy/k8s/k3d-config.yaml
+	k3d image import "$(GATEWAY_IMAGE)" "$(MOCK_IMAGE)" -c $(K3D_CLUSTER)
+	kubectl apply -f deploy/k8s/rendered/
+	@echo "waiting for the stack (gateway -> mock workers -> scaler)..."
+	kubectl -n $(K8S_NAMESPACE) rollout status deploy/gateway --timeout=180s
+	kubectl -n $(K8S_NAMESPACE) rollout status deploy/mock-workers --timeout=180s
+	kubectl -n $(K8S_NAMESPACE) rollout status deploy/scaler --timeout=180s
+	@echo "gateway (host) : http://localhost:8080"
+	@$(MAKE) --no-print-directory k8s-status
+
+k8s-deploy: k8s-render ## re-apply manifests to an existing cluster
+	kubectl apply -f deploy/k8s/rendered/
+
+k8s-check:       ## the six short k8s acceptance scenarios (minutes, mock workers only)
+	python3 benchmarks/k8s/run_k8s_check.py
+
+k8s-bridge-check: ## one native Metal worker + gateway in k3d + 4 concurrent short requests
+	python3 benchmarks/k8s/run_bridge_check.py
+
+k8s-status:
+	@kubectl get pods -n $(K8S_NAMESPACE) 2>/dev/null || echo "cluster not up (make k8s-up)"
+
+k8s-down:
+	k3d cluster delete $(K3D_CLUSTER)

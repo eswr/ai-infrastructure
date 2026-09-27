@@ -21,3 +21,4 @@ tmp/
 # Model caches / weights never belong in git
 *.gguf
 *.safetensors
+rendered/

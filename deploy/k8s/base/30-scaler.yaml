@@ -1,0 +1,54 @@
+# The scaler: a Deployment (not an HPA). It reads the gateway's queue
+# signals and patches deployments/scale directly. See scaler.py for the
+# policy — queue time and SLO misses decide, never CPU.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scaler-script
+  namespace: inference-lab
+data:
+  scaler.py: |
+__SCALER_SCRIPT__
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scaler
+  namespace: inference-lab
+  labels: {app: scaler}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: scaler}
+  template:
+    metadata:
+      labels: {app: scaler}
+    spec:
+      serviceAccountName: inference-lab
+      containers:
+        - name: scaler
+          image: python:3.12-slim
+          command: ["python3", "/scaler/scaler.py"]
+          env:
+            - name: TICK_S
+              value: "2"
+            - name: SCALE_UP_QUEUE_S
+              value: "0.5"
+            - name: SCALE_UP_QUEUED
+              value: "2"
+            - name: SCALE_UP_SLO_RATE
+              value: "0.2"
+            - name: SCALE_DOWN_IDLE_S
+              value: "25"
+            - name: MIN_REPLICAS
+              value: "2"
+            - name: MAX_REPLICAS
+              value: "6"
+          volumeMounts:
+            - {name: script, mountPath: /scaler}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 96Mi}
+      volumes:
+        - name: script
+          configMap: {name: scaler-script}

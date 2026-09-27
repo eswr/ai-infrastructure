@@ -1,0 +1,42 @@
+# inference-lab namespace + RBAC.
+# The gateway reads pods/endpoints (discovery); the scaler patches
+# deployments/scale (autoscaling). One ServiceAccount for both.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: inference-lab
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: inference-lab
+  namespace: inference-lab
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: inference-lab
+  namespace: inference-lab
+rules:
+  # gateway discovery: the pod spec is the worker registration
+  - apiGroups: [""]
+    resources: [pods, endpoints, services]
+    verbs: [get, list, watch]
+  # scaler: the custom autoscaler writes replica counts directly
+  - apiGroups: ["apps"]
+    resources: [deployments, deployments/scale]
+    verbs: [get, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: inference-lab
+  namespace: inference-lab
+subjects:
+  - kind: ServiceAccount
+    name: inference-lab
+    namespace: inference-lab
+roleRef:
+  kind: Role
+  name: inference-lab
+  apiGroup: rbac.authorization.k8s.io
