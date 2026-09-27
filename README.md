@@ -44,6 +44,18 @@ make failcheck
 # the six worker-lifecycle acceptance scenarios: silent wedge, connection
 # failure, empty completion, mid-stream stall, restart/recovery, drain
 make lifecycle-check
+
+# phase 5: the control plane under kubernetes (k3d) — discovery, readiness,
+# draining, queue-signal autoscaling, native-Metal bridge; minutes, mock workers
+make k8s-up        # once: build images + create cluster + deploy
+make k8s-check     # six acceptance scenarios (~3 min)
+make k8s-demo      # the six-beat milestone demo (1.8 min)
+
+# phase 6: datacenter control-plane SIMULATION — heterogeneous GPU fleet,
+# placement/memory estimation, mock-DCGM telemetry (simulation="true"),
+# node lifecycle + failure exercises; plus a Slurm batch-side lab (fake GRES)
+make fleet-check   # six fleet scenarios (<1 min)
+make slurm-up && make slurm-demo   # sinfo/sbatch --gres/squeue/drain
 ```
 
 Swap workers freely — they all speak the OpenAI API on known ports:
@@ -122,6 +134,32 @@ docs/          architecture · benchmark-methodology · failure-testing ·
       warm reuse erases prefill (TTFT ×24.7 at c1), savings/token ×270 from c1→c8,
       and the cold-population trap: same-prefix bursts serialize on LCP slot
       affinity (253 s vs 19 s all-miss) — tag `phase-4b-prefix-cache`
-- [ ] vLLM-Metal benchmarks (needs `uv sync` in workers/vllm-metal)
-- [ ] Cross-runtime comparison at matched model size (9B GGUF/MLX/vLLM)
-- [ ] k3d control-plane simulation, fake accelerator node labels
+- [x] Cross-runtime comparison at matched model size — tag `phase-4-runtime-comparison`
+- [x] Load-gated prefix-aware routing + persistent calibrated cost model
+      (tags `phase-4b2-prefix-routing`, `phase-4b3-…`)
+- [x] Serving interactions: contention curves, marginal-cost gate, service
+      classes (tag `phase-4c-serving-interactions`)
+- [x] k3d control plane: kubernetes worker discovery, lifecycle-driven
+      readiness, graceful draining, queue-signal autoscaling, native-Metal
+      bridge — `make k8s-check` (tag `phase-5-k3d-control-plane`), demo:
+      `make k8s-demo` (docs/results/phase5-demo/)
+- [x] Datacenter control-plane simulation (phase 6): heterogeneous GPU fleet
+      (H100×2/L40S/A10 labels), memory-estimator placement gate
+      (reject-before-dispatch, TP groups, KV bounds), mock-DCGM exporter
+      (simulation="true"), node lifecycle (provision/ready/cordon/drain/
+      maintenance/failed/recovering), failure exercises (XID, thermal, OOM)
+      — `make fleet-check`; Slurm batch-side lab with FAKE GRES GPUs
+      (`make slurm-up` / `slurm-demo`)
+
+## Scope: measured vs simulated
+
+Everything under [x] above was **measured or exercised locally** on this
+Mac (M5, 24 GB unified memory) and in its k3d cluster. **NVIDIA-specific
+measurements — CUDA kernel performance, HBM bandwidth/behavior, NVLink/NCCL
+scaling, and real DCGM telemetry — are outside the locally validated
+scope.** Phase 6's GPU fleet, its DCGM-shaped metrics
+(`simulation="true"`), and its Slurm GRES resources are explicitly labeled
+simulations of the *control plane*: the scheduling, placement, lifecycle,
+and failure-response logic is real code with real tests; the accelerators
+behind it are not. A real dcgm-exporter or GPU node drops in later without
+changing a dashboard, a metric name, or a line of scheduler logic.

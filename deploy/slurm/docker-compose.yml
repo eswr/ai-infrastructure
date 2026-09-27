@@ -1,0 +1,44 @@
+services:
+  slurmctl:
+    build: .
+    image: inference-lab/slurm:phase6
+    hostname: slurmctl
+    user: root
+    command: ["slurmctld", "-D", "-L", "/dev/stdout"]
+    volumes:
+      - munge:/var/lib/munge
+      - ctld-spool:/var/spool/slurmctld
+    networks: [slurmnet]
+
+  node01:
+    image: inference-lab/slurm:phase6
+    build: .
+    hostname: node01
+    user: root
+    command: ["slurmd", "-D", "-N", "node01", "-L", "/dev/stdout"]
+    volumes:
+      - munge:/var/lib/munge
+      - slurmd-spool:/var/spool/slurmd
+    networks: [slurmnet]
+    depends_on: [slurmctl]
+
+  node02:
+    image: inference-lab/slurm:phase6
+    build: .
+    hostname: node02
+    user: root
+    command: ["slurmd", "-D", "-N", "node02", "-L", "/dev/stdout"]
+    volumes:
+      - munge:/var/lib/munge
+      - slurmd-spool2:/var/spool/slurmd
+    networks: [slurmnet]
+    depends_on: [slurmctl]
+
+volumes:
+  munge:
+  ctld-spool:
+  slurmd-spool:
+  slurmd-spool2:
+
+networks:
+  slurmnet:
