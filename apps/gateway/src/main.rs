@@ -301,6 +301,25 @@ fn est_work_ms(st: &AppState, est_in: u64, out_tok: u64) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
+/// The RECOMPUTE tokens admission should budget for this request: the
+/// prompt minus the best reusable prefix any healthy slot could offer it
+/// (phase 4C). Budgeting raw prompt length made the prefill budget a
+/// cache-blind proxy — a fully-warm 8K request counted 8192 tokens of
+/// "prefill work" it would never run, and the measured warm cell paid
+/// 137.9 s TTFT p50 vs the baseline's 42.4 s purely for that accounting
+/// artifact. Admission prices marginal accelerator work; reuse is work
+/// that will not happen.
+fn est_recompute_tokens(st: &AppState, hash: u64, est_in: u64) -> u64 {
+    let best_reusable = st
+        .router
+        .healthy_workers()
+        .iter()
+        .map(|w| w.slot_cache_view(hash, est_in).reusable_tokens)
+        .max()
+        .unwrap_or(0);
+    est_in.saturating_sub(best_reusable).max(1)
+}
+
 // ---------------------------------------------------------------------------
 // Chat completions: the full path
 // ---------------------------------------------------------------------------
@@ -370,10 +389,11 @@ async fn chat_completions(
     );
 
     // ---- admission ---------------------------------------------------------
+    let recompute_tokens = est_recompute_tokens(&st, hash, est_in);
     let size = RequestSize {
-        input_tokens: est_in,
+        input_tokens: recompute_tokens,
         output_tokens: out_tok,
-        est_work_ms: est_work_ms(&st, est_in, out_tok),
+        est_work_ms: est_work_ms(&st, recompute_tokens, out_tok),
         class: service_class,
     };
 
