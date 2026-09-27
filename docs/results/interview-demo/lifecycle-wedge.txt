@@ -1,0 +1,11 @@
+cargo build --release --workspace
+    Finished `release` profile [optimized] target(s) in 0.26s
+python3 benchmarks/lifecycle/run_lifecycle_check.py silent-wedge
+
+=== silent-wedge
+  => silent-wedge: PASS
+
+lifecycle-check: 1 passed, 0 failed
+real 8.44
+user 0.20
+sys 0.16

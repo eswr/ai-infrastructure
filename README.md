@@ -111,6 +111,19 @@ request → estimate tokens → admission control → scheduler → worker → s
 See [docs/architecture.md](docs/architecture.md) for the full picture and
 [docs/results/](docs/results/) for measured studies.
 
+## Interview demo kit
+
+Minute-scale, deterministic demo flows and the eight-number results page:
+
+- [docs/interview-demo.md](docs/interview-demo.md) — demo modes, talk
+  tracks, `make demo-metal | demo-wedge | demo-admission | demo-k8s |
+  demo-placement | demo-fleet-failure | demo-slurm` (each < 3 min, no
+  `demo-all` by design), and frozen fallback transcripts
+- [docs/results/interview-scorecard.md](docs/results/interview-scorecard.md)
+  — the results slide: eight verified numbers with their frozen artifacts
+- [docs/interview-walkthrough.md](docs/interview-walkthrough.md) — the
+  10-minute three-incident narrative
+
 ## Layout
 
 ```text

@@ -1,0 +1,64 @@
+python3 benchmarks/k8s/run_demo.py
+==========================================================================
+PHASE-5 DEMO — the k3d control plane
+discovery | readiness | recovery | draining | autoscaling | bridge
+==========================================================================
+
+[1/6] the deployment — kubectl get pods
+  NAME                            READY   STATUS    RESTARTS   AGE
+  gateway-67585f978b-qhtp9        1/1     Running   0          13m
+  mock-dcgm-5fd8846d6-mk4vc       1/1     Running   0          37m
+  mock-workers-6d74f675fd-4dw7n   1/1     Running   0          3s
+  mock-workers-6d74f675fd-bp4mc   1/1     Running   0          3s
+  scaler-7c9bdc8968-9jtjr         1/1     Running   0          37m
+  gateway registry: mock-workers-6d74f675fd-bp4mc state=ready runtime=mock model=mock-gpu in_service=True
+  gateway registry: mock-workers-6d74f675fd-4dw7n state=ready runtime=mock model=mock-gpu in_service=True
+  ✅ gateway + 2 workers READY — discovered from kubernetes, no hard-coded list  (0s)
+
+[2/6] queue pressure — the autoscaler adds capacity
+  12 concurrent high-work requests exceed the active-output budget;
+  the gateway's estimated_queue_seconds crosses the scaler threshold
+  SCALE UP: 2 -> 3 replicas (queue-signal driven, never CPU)
+  pressure absorbed; returning the pool to its 2-replica baseline
+  ✅ the scaler watches the gateway's queue, not CPU  (40s)
+
+[3/6] break a worker — silent wedge
+  wedge mock-workers-6d74f675fd-4dw7n (answers /health, can no longer generate)
+  gateway lifecycle: READY -> UNHEALTHY (functional_probe_timeout)
+  kubernetes readiness: True -> False  (pod leaves its Service)
+  worker /health during wedge: HTTP 200 — the lie the probe exists for
+  traffic moved away: 6/6 chats, 0 landed on the wedged worker
+  ✅ functional readiness drives kubernetes — /health alone lied  (9s)
+
+[4/6] heal the worker — recovery with a new generation epoch
+  wedge again, then remove the fault; watch the recovery ladder
+  recovery path: unhealthy -> recovering -> warming -> recovering -> warming -> ready
+  generation epoch: 3 -> 5 (a wedged incarnation is never blended with its successor)
+  ✅ quarantine -> recovery hysteresis -> READY, re-entered service  (18s)
+
+[5/6] delete a pod mid-stream — graceful draining
+  stream in flight on mock-workers-6d74f675fd-bp4mc; kubectl delete pod (preStop /drain)
+  active stream COMPLETED on the terminating pod
+  5/5 concurrent chats served during the replacement — 0 dropped
+  ✅ drain lets work finish; termination waits for active == 0  (6s)
+
+[6/6] bridge to native MLX — k3d gateway, Metal on the host
+  (starting the native mlx-lm worker and bridging it via host.docker.internal — real generation through the cluster edge)
+  starting native mlx-lm worker on :8082 (mlx-community/Qwen3.5-9B-4bit)
+  native worker live (Metal, host macOS)
+  gateway lifecycle: mlx-native state=ready generation=2 (probe = real generation via host.docker.internal)
+    request 0: 200, 16 tokens, client e2e 0.46s
+    request 1: 200, 16 tokens, client e2e 0.46s
+    request 2: 200, 16 tokens, client e2e 4.05s
+    request 3: 200, 16 tokens, client e2e 2.75s
+  4/4 concurrent requests served: k3d gateway -> host.docker.internal -> native Metal -> client
+  gateway restored (EXTERNAL_WORKERS unset)
+  BRIDGE OK in 23s
+  native worker stopped
+  ✅ the control plane reaches out-of-cluster accelerators unchanged  (23s)
+
+==========================================================================
+DEMO COMPLETE in 1.7 min — one laptop, one cluster, one GPU worker; the architecture transfers.
+real 100.32
+user 10.94
+sys 8.75

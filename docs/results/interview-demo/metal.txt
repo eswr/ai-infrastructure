@@ -1,0 +1,32 @@
+cargo build --release --workspace
+    Finished `release` profile [optimized] target(s) in 0.20s
+bash benchmarks/demo/demo_metal.sh
+    Finished `release` profile [optimized] target(s) in 0.07s
+waiting for the worker to load the model...
+Model:      mlx-community/Qwen3.5-9B-4bit  (real weights, ~5.5 GB)
+Runtime:    mlx-lm.server
+Hardware:   Apple M5, 24 GB unified memory (Metal GPU)
+Streaming:  yes (SSE)
+Requests:   4, burst, 128-token prompts, 32 output tokens
+Measured:   client-side per-stream (loadgen crate)
+
+loadgen → http://127.0.0.1:8082  model=mlx-community/Qwen3.5-9B-4bit  stream=true  requests=4  concurrency=1  in≈128tok  out=32tok
+
+scenario      smoke
+requests      4 total / 4 ok / 0 failed
+wall time     21.03s
+ttft_ms       p50    1626.3  p95    5396.4  p99    5887.1
+itl_ms        p50      76.1  p95     149.5  p99     213.9
+tpot_ms       p50      82.0  p95     109.0  p99     111.5
+e2e_ms        p50    4399.8  p95    8225.9  p99    8641.1
+stall_ms      p50     133.2  p95     269.8  max     293.9  (per-stream worst gap)
+spread        5.26s   slowest/fastest ×2.51
+req/s         0.19
+output tok/s  5.9   (124 tokens)
+input  tok/s  36.5   (768 tokens)
+
+wrote benchmarks/results/smoke-20260927-232408.json
+wrote benchmarks/results/smoke-20260927-232408.csv
+real 28.58
+user 7.50
+sys 8.53

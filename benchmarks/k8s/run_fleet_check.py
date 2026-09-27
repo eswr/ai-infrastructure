@@ -377,16 +377,29 @@ def scenario_oom():
 SCENARIOS = [scenario_discovery, scenario_placement, scenario_node_lifecycle,
              scenario_xid, scenario_thermal, scenario_oom]
 
+# Friendly names for partial runs: `run_fleet_check.py xid thermal oom`.
+# Every invocation starts from reset_fleet(), so any subset is safe.
+SCENARIO_NAMES = [sc.__name__.removeprefix("scenario_") for sc in SCENARIOS]
+
 
 def main() -> int:
     t0 = time.time()
     s, _ = http("GET", f"{GW}/healthz", timeout=5)
     assert s == 200, f"gateway not reachable — run `make k8s-up` first"
-    log("fleet acceptance suite: 6 scenarios, simulated GPUs, real control plane")
+    wanted = sys.argv[1:]
+    unknown = [w for w in wanted if w not in SCENARIO_NAMES]
+    if unknown:
+        sys.exit(f"unknown scenario(s): {', '.join(unknown)} — "
+                 f"choose from: {', '.join(SCENARIO_NAMES)}")
+    selected = ([sc for sc in SCENARIOS
+                 if sc.__name__.removeprefix("scenario_") in wanted]
+                if wanted else SCENARIOS)
+    log(f"fleet acceptance suite: {len(selected)} scenario(s), "
+        f"simulated GPUs, real control plane")
     reset_fleet()  # whatever a previous run left behind: node states, faults
     log("")
     failed = []
-    for sc in SCENARIOS:
+    for sc in selected:
         try:
             sc()
         except Exception as e:
@@ -395,10 +408,10 @@ def main() -> int:
         print()
     mins = (time.time() - t0) / 60
     if failed:
-        log(f"fleet-check: {len(SCENARIOS) - len(failed)}/{len(SCENARIOS)} passed "
+        log(f"fleet-check: {len(selected) - len(failed)}/{len(selected)} passed "
             f"({mins:.1f} min); FAILED: {', '.join(failed)}")
         return 1
-    log(f"fleet-check: {len(SCENARIOS)}/{len(SCENARIOS)} scenarios passed in {mins:.1f} min")
+    log(f"fleet-check: {len(selected)}/{len(selected)} scenarios passed in {mins:.1f} min")
     return 0
 
 

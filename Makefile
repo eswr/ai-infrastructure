@@ -11,7 +11,8 @@ MOCK_IMAGE ?= inference-lab/mock-worker:phase5
         experiment-prefix-router experiment-serving-interactions \
         worker-mlx worker-llama worker-vllm worker-mock gateway \
         up down obs-logs k8s k8s-images k8s-up k8s-deploy k8s-render k8s-check k8s-demo k8s-bridge-check \
-        fleet-check k8s-status k8s-down slurm-up slurm-demo slurm-down
+        fleet-check k8s-status k8s-down slurm-up slurm-demo slurm-down \
+        demo-metal demo-wedge demo-admission demo-k8s demo-placement demo-fleet-failure demo-slurm
 
 setup:            ## fresh-checkout bootstrap: toolchain checks + workspace build
 	@command -v cargo >/dev/null 2>&1 || { echo "ERROR: rust not found — install via https://rustup.rs"; exit 1; }
@@ -99,7 +100,35 @@ experiment-serving-interactions: build-release ## phase-4C integration test: 4 c
 experiment-serving-interactions-full: build-release ## phase-4C exhaustive 16-cell ablation (hours; run deliberately)
 	python3 benchmarks/serving_interactions.py --runtime llama-cpp --matrix-full --mixed
 
-# -------------------------------------------------------- observability --
+# ------------------------------------------------------------- interview --
+# Deterministic minute-scale demo flows for interviews (docs/interview-demo.md).
+# Deliberately NO `demo-all`: an interviewer never watches a 20-minute script.
+# Frozen fallback transcripts for every target: docs/results/interview-demo/.
+
+demo-metal: build-release ## live: real MLX 9B-4bit measurement (TTFT/ITL/e2e) — ~1 min
+	bash benchmarks/demo/demo_metal.sh
+
+demo-wedge: build-release ## live: /health lies — silent wedge -> quarantine -> recovery — ~1 min
+	python3 benchmarks/lifecycle/run_lifecycle_check.py silent-wedge
+
+demo-admission: ## saved evidence: the 0/16 -> 16/16 overload incident (frozen artifacts)
+	python3 benchmarks/demo/demo_admission.py
+
+demo-k8s: ## live: the six-beat k3d control-plane demo — needs `make k8s-up` — ~2 min
+	python3 benchmarks/k8s/run_demo.py
+
+demo-placement: ## live: fleet discovery + placement matrix — needs `make k8s-up` — ~1 min
+	python3 benchmarks/k8s/run_fleet_check.py discovery placement
+
+demo-fleet-failure: ## live: XID / thermal / OOM drills — needs `make k8s-up` — ~1 min
+	python3 benchmarks/k8s/run_fleet_check.py xid thermal oom
+
+demo-slurm: ## live: Slurm GRES vocabulary — starts the compose lab if needed — ~1 min
+	docker compose -f deploy/slurm/docker-compose.yml up -d
+	@sleep 6
+	bash experiments/slurm/exercises.sh
+
+# ------------------------------------------------------- observability --
 
 up:              ## start Prometheus/Grafana/Tempo/Loki/OTel-collector
 	docker compose -f deploy/compose/docker-compose.yml up -d

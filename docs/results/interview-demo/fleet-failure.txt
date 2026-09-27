@@ -1,0 +1,23 @@
+python3 benchmarks/k8s/run_fleet_check.py xid thermal oom
+[fleet-check 04:54:29] fleet acceptance suite: 3 scenario(s), simulated GPUs, real control plane
+[fleet-check 04:54:32] 
+[fleet-check 04:54:32] scenario 4: critical XID -> node FAILED -> replacement -> READY
+[fleet-check 04:54:34]   XID 48 -> node-gpu-01 FAILED, workers drained, scheduling stopped
+[fleet-check 04:54:34]   H100 placements refused while the node is failed
+[fleet-check 04:54:36]   replacement registered -> RECOVERING -> READY -> placements resume
+[fleet-check 04:54:36]   PASS: critical-fault response (drain, stop, replace, validate)
+
+[fleet-check 04:54:36] scenario 5: thermal event -> cordon + degrade, traffic continues
+[fleet-check 04:54:38]   node CORDONED, worker thermal_throttling strike recorded (3 transition(s)); worker now degraded — still serving
+[fleet-check 04:54:39]   new placement of qwen2.5-32b-instruct-q4 refused (cordoned, not resident); existing traffic fine
+[fleet-check 04:54:40]   PASS: soft-fault response (degrade, don't evacuate)
+
+[fleet-check 04:54:40] scenario 6: GPU OOM -> immediate worker quarantine -> recovery
+[fleet-check 04:54:42]   FB pinned full -> worker quarantined (memory_pressure, immediate)
+[fleet-check 04:54:44]   memory cleared -> functional probes pass -> worker READY -> placements resume
+[fleet-check 04:54:44]   PASS: OOM response (immediate quarantine, probe-based recovery)
+
+[fleet-check 04:54:44] fleet-check: 3/3 scenarios passed in 0.2 min
+real 14.59
+user 0.22
+sys 0.10

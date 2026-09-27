@@ -1,0 +1,53 @@
+python3 benchmarks/demo/demo_admission.py
+overload incident — 8K prompt x c8, 16 requests, out=256
+mlx-community/Qwen3.5-9B-4bit on Apple M5 (24 GB), via the gateway
+
+  run A  unbounded          0/16 delivered   wall 1800 s  (silent: /health 200 throughout)
+  run B  admission ON      16/16 delivered   ITL p50 ~60 ms
+
+mechanism: every request is priced (estimated prefill + decode ms from the
+calibrated service model); requests admit only while active estimated work
+fits the budget; overflow queues (interactive-first) and answers
+429 + Retry-After past the overload ceiling. Cancellation releases budget.
+
+--- run A — unbounded (frozen console) (run-A-console.txt, tail) ---
+scenario      unbounded-8k-c8
+requests      16 total / 0 ok / 16 failed
+wall time     1800.02s
+ttft_ms       n/a
+itl_ms        n/a
+tpot_ms       n/a
+e2e_ms        p50  900008.8  p95  900008.8  p99  900008.8
+req/s         0.00
+output tok/s  0.0   (0 tokens)
+input  tok/s  73.4   (132096 tokens)
+
+wrote benchmarks/results/admission-saturation-20260924-214429/unbounded-8k-c8-20260924-164429.json
+wrote benchmarks/results/admission-saturation-20260924-214429/unbounded-8k-c8-20260924-164429.csv
+note: 16 request(s) failed
+
+--- run B — admission ON (frozen console) (run-B-console.txt, tail) ---
+
+scenario      admission-controlled-8k-c8
+requests      16 total / 16 ok / 0 failed
+wall time     786.16s
+ttft_ms       p50  364979.2  p95  416922.8  p99  417017.7
+itl_ms        p50      63.7  p95      84.0  p99     119.0
+tpot_ms       p50      66.6  p95      72.2  p99      74.9
+e2e_ms        p50  381982.3  p95  433586.0  p99  433948.8
+req/s         0.02
+output tok/s  5.2   (4066 tokens)
+input  tok/s  168.0   (132096 tokens)
+
+wrote benchmarks/results/admission-saturation-20260924-214429/admission-controlled-8k-c8-20260924-165756.json
+wrote benchmarks/results/admission-saturation-20260924-214429/admission-controlled-8k-c8-20260924-165756.csv
+
+full study:      docs/results/admission-saturation.md
+raw artifacts:   benchmarks/results/admission-saturation-20260924-214429/ (gitignored)
+reproduce:       make experiment-admission-saturation  (~55 min, real GPU — not for interviews)
+live companion:  make failcheck  (deterministic 429 + Retry-After backpressure, ~2 min)
+git tag:         phase-3-admission-control
+
+real 0.06
+user 0.02
+sys 0.01

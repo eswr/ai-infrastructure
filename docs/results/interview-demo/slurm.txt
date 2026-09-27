@@ -1,0 +1,42 @@
+docker compose -f deploy/slurm/docker-compose.yml up -d
+ Container slurm-node01-1 Running 
+ Container slurm-node02-1 Running 
+ Container slurm-slurmctl-1 Running 
+bash experiments/slurm/exercises.sh
+== sinfo: partitions and node states ==
+PARTITION AVAIL  TIMELIMIT  NODES  STATE NODELIST
+gpu*         up    8:00:00      2   idle node[01-02]
+batch        up    4:00:00      2   idle node[01-02]
+
+== sbatch: submit a job that requests one FAKE A100 ==
+Submitted batch job 5
+
+== squeue: the queue (online inference has none of this) ==
+             JOBID PARTITION     NAME     USER ST       TIME  NODES NODELIST(REASON)
+
+== srun: interactive allocation of both GPUs on node01 ==
+node01
+
+== scontrol: inspect a node's GRES ==
+NodeName=node01 Arch=aarch64 CoresPerSocket=1 
+   Gres=gpu:a100:2
+   RealMemory=4096 AllocMem=0 FreeMem=265 Sockets=4 Boards=1
+   State=IDLE ThreadsPerCore=1 TmpDisk=0 Weight=1 Owner=N/A MCS_label=N/A
+
+== drain and resume node02 (the Slurm counterpart of k8s cordon/drain) ==
+NODELIST   NODES PARTITION STATE 
+node01         1      gpu* idle  
+node01         1     batch idle  
+node02         1      gpu* drain 
+node02         1     batch drain 
+NODELIST   NODES PARTITION STATE 
+node01         1      gpu* idle  
+node01         1     batch idle  
+node02         1      gpu* idle* 
+node02         1     batch idle* 
+
+== sacct/accounting-free note: priorities are basic here; see README ==
+slurm-demo complete
+real 9.95
+user 0.39
+sys 0.23

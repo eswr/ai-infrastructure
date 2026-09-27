@@ -1,0 +1,19 @@
+python3 benchmarks/k8s/run_fleet_check.py discovery placement
+[fleet-check 04:54:15] fleet acceptance suite: 2 scenario(s), simulated GPUs, real control plane
+[fleet-check 04:54:18] 
+[fleet-check 04:54:18] scenario 1: heterogeneous fleet discovery
+[fleet-check 04:54:18]   4 GPUs / 3 nodes: [('nvidia-a10', 'node-gpu-03'), ('nvidia-h100', 'node-gpu-01'), ('nvidia-h100', 'node-gpu-01'), ('nvidia-l40s', 'node-gpu-02')]
+[fleet-check 04:54:18]   PASS: capabilities registered from kubernetes labels
+
+[fleet-check 04:54:18] scenario 2: placement matrix (memory estimation before dispatch)
+[fleet-check 04:54:22]   70B fp16 single GPU      -> 422 (no placement possible (insufficient_memory): mock-workers-6d...)
+[fleet-check 04:54:22]   8B q4 @4K ctx            -> placed (fits all classes)
+[fleet-check 04:54:22]   70B fp16 TP-2            -> placed on tg-h100-01 (simulated ranks)
+[fleet-check 04:54:25]   70B q4 loaded models on  -> ['nvidia-h100'] (never the 24 GB A10)
+[fleet-check 04:54:25]   8B q4 @400K ctx          -> 422 (KV cache estimate exceeds all VRAM)
+[fleet-check 04:54:25]   PASS: placement gate (reject-before-dispatch, TP groups, KV bounds)
+
+[fleet-check 04:54:25] fleet-check: 2/2 scenarios passed in 0.2 min
+real 10.34
+user 0.31
+sys 0.17
