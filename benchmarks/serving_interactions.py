@@ -178,7 +178,12 @@ def run_loadgen_monitored(loadgen_bin: Path, toml_path: Path, out_dir: Path,
                 if ok > last_ok:
                     last_ok = ok
                     last_progress = time.time()
-                elif in_flight > 0 and time.time() - last_progress > stall_s:
+                elif (last_ok > 0 and in_flight > 0
+                      and time.time() - last_progress > stall_s):
+                    # Armed only after the leg's FIRST completion: a cold
+                    # c8 anti-scaling crawl legitimately completes nothing
+                    # for the first several minutes, and must be measured,
+                    # not aborted. Before that, the time budget governs.
                     termination = "no_progress"
                     break
             if time.time() - t0 > budget_s:
