@@ -158,16 +158,24 @@ def run_loadgen_monitored(loadgen_bin: Path, toml_path: Path, out_dir: Path,
         last_ok = 0.0
         last_progress = time.time()
         termination = None
+        last_all_down = False
         while proc.poll() is None:
             time.sleep(5)
             status, body = http_get("http://127.0.0.1:8080/status", timeout_s=2.0)
             if status == 200:
                 try:
-                    if any(not w["healthy"] for w in json.loads(body)["workers"]):
-                        termination = "worker_unhealthy"
-                        break
+                    workers = json.loads(body)["workers"]
                 except (json.JSONDecodeError, KeyError, TypeError):
-                    pass
+                    workers = []
+                # ALL slot workers share one llama-server endpoint, so one
+                # /health hiccup under prefill saturation flags every slot
+                # at once - require the WHOLE bank to be down on two
+                # consecutive polls before declaring the leg dead.
+                all_down = bool(workers) and all(not w["healthy"] for w in workers)
+                if all_down and last_all_down:
+                    termination = "worker_unhealthy"
+                    break
+                last_all_down = all_down
             mstatus, mbody = http_get("http://127.0.0.1:8080/metrics", timeout_s=2.0)
             if mstatus == 200:
                 prom = parse_prom_text(mbody)
@@ -662,12 +670,14 @@ def matrix_leg(gateway_bin: Path, loadgen_bin: Path, study_dir: Path,
             post = rt.functional_probe(phase=f"post_{leg}")
             record["post_run_probe"] = {"ok": post.ok, "tokens": post.tokens,
                                         "error": post.error}
-            collapsed = (record.get("terminated_early")
-                         and record.get("termination_reason") != "worker_unhealthy")
-            record["verdict"] = ("collapsed" if collapsed
-                                 else "healthy"
-                                 if post.ok and record["run_exit"] == 0
-                                 else "degraded")
+            if record.get("terminated_early"):
+                record["verdict"] = ("collapsed"
+                                     if record["termination_reason"] != "worker_unhealthy"
+                                     else "degraded")
+            else:
+                record["verdict"] = ("healthy"
+                                     if post.ok and record["run_exit"] == 0
+                                     else "degraded")
         finally:
             stop_gateway(gw)
     return record
