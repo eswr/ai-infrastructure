@@ -492,7 +492,76 @@ one-process sketch of what the operator does with CRD-driven component
 states. Their "state manager applies components in order and reports one
 node-level state" is precisely our PROVISIONING → READY validation ladder.
 
-## Trace 5 — one scrape through dcgm-exporter
+### Session record 5 — dcgm-exporter, telemetry semantics only (read 2026-09-28, sparse checkout at HEAD)
+
+Files actually read: `etc/default-counters.csv` (126 lines),
+`internal/pkg/counters/counter_config.go` (258),
+`internal/pkg/collector/gpu_collector.go` (1049, label/label-skip paths),
+`internal/pkg/collector/xid_collector.go` (84), plus greps across
+`internal/pkg/` for XID aggregates and event emission.
+
+**The verified path:** `cmd/dcgm-exporter/main.go` → `internal/pkg/server/`
+scrape → collectors built from a counter catalog CSV → per-GPU DCGM field
+reads → label/value conversion (`gpu_collector.go:778-794`: `UUID`,
+`Hostname`, `Labels` attached per metric; `counter.IsLabel()` entries
+become labels instead of series) → Prometheus exposition.
+
+**Answers:**
+
+1. *Default counters* — `etc/default-counters.csv`: 26 enabled, more
+   commented; plain `DCGM_FI_…, type, help` rows. Custom sets = a
+   different CSV via config; the exporter computes additional
+   EXP-prefixed aggregates itself (`DCGM_EXP_XID_ERRORS_COUNT` windowed
+   gauge, `DCGM_EXP_XID_ERRORS_TOTAL` counter — via
+   `xid_total_collector.go`, disabled by default).
+2. *Units* (all in the help strings — the catalog IS the unit
+   documentation): FB_USED/FREE **MiB**; POWER_USAGE **W**; GPU_TEMP **C**;
+   GPU_UTIL **%**; XID_ERRORS dimensionless "value of the last XID error
+   encountered" (a GAUGE of the latest code); PCIe in the default set is
+   `DCGM_FI_PROF_PCIE_{TX,RX}_BYTES` in **bytes per second** — not the
+   older `DCGM_FI_DEV_PCIE_*_THROUGHPUT` MB/s fields our mock invented.
+3. *Unsupported/unavailable fields* — failed field reads are skipped
+   (`continue` in the collect loops), not exported as sentinels; the
+   metric's existence is availability.
+4. *GPU vs workload identity* — GPU identity: `gpu` (index), `UUID`,
+   `device`, `modelName`, `Hostname`. Workload identity: a kubeclient
+   pod-mapper adds pod/namespace/container labels for GPUs bound to pods,
+   and config exposes GPU bind/unbind event watching
+   (`appconfig/types.go:202`). Our mock's `worker` label plays the pod
+   role.
+5. *Severity interpretation* — none in the metric path. The exporter
+   publishes the raw latest-XID-code gauge plus computed windowed
+   totals; classifying 48/74/79 as "critical" is a CONSUMER's job. Our
+   mock also passes the code through uninterpreted — the critical-set
+   lives in `fleet.rs` (gateway), which is the correct side.
+6. *XID events: metrics, logs, or events?* — metrics (the gauge) and
+   computed metrics (EXP counters); no Kubernetes event emission in the
+   verified tree. Anything event-shaped happens outside the exporter.
+7. *What the mock got right / invented* — right: XID-as-latest-code
+   gauge, FB in MiB, gauge/counter typing, label shapes (UUID/device/
+   modelName/Hostname), catalog-style help strings. Invented (now
+   explicit): `DCGM_FI_DEV_PCIE_TX_THROUGHPUT` in "MB/s" (real default
+   catalog uses PROF_*_BYTES in bytes/s — normalized in this commit);
+   an actuator half (fault injection) that real dcgm-exporter cannot
+   have — it changes no GPU state; and model-aware FB baselines, which
+   real framebuffer readings get from actual allocations.
+
+**Measurement / interpretation / policy / action — now explicit:**
+
+| layer | real NVIDIA stack | inference-lab |
+| --- | --- | --- |
+| measurement | dcgm-exporter (raw DCGM fields) | mock exporter (simulated fields) |
+| interpretation | consumers (none built-in) | fleet.rs (XID critical set, thresholds) |
+| policy | operator/cluster admins (taints, conditions) | fleet.rs decisions (cordon/fail/quarantine) |
+| action | kubelet + scheduler (withdraw resources, stop placing) | fleet.rs + discovery (drain, remove, re-validate) |
+
+**Adoption candidate (exactly one): normalize the mock's metric metadata
+against the real catalog** — PCIe fields corrected to bytes/sec semantics,
+unit help strings matched to `default-counters.csv`, and a catalog-
+provenance comment. Implemented in this commit. **Rejected**: adding
+DCGM_EXP-style windowed aggregates and severity classification to the
+mock — both belong to consumers, and adopting them would re-fuse the
+measurement/interpretation split session 4 established.
 
 ```text
 Prometheus scrape → HTTP server → collector loop → DCGM (nvml/DCGM API)
@@ -512,7 +581,54 @@ XID-as-latest-code semantics, with `simulation="true"` on everything. The
 unit lesson we hit live (DCGM reports framebuffer in **MiB**) is a real
 dcgm-exporter contract.
 
-## Trace 6 — one job through Slurm
+### Session record 6 — Slurm, the allocation layer (read 2026-09-28, sparse checkout at HEAD)
+
+Files actually read (structure + core paths): `job_test.c` (4093 lines —
+header contract, `_get_job_node_req`, `_select_nodes` entry),
+`gres_select_filter.c` (1944 lines — consumable GRES selection:
+`nonalloc_gres`, per-socket counts, `max_node_gres`),
+`src/interfaces/gres.c` (11633 lines — GRES bookkeeping),
+`priority/multifactor/priority_multifactor.c`.
+
+**The verified path:** `sbatch` job record → `job_test.c` "Determine if
+job can be allocated resources" → `_get_job_node_req` (exclusive vs shared
+vs overcommit, from partition `OverSubscribe`/`max_share`) →
+`_select_nodes` → topology-aware `eval_nodes` with GRES filtering
+(`gres_select_filter.c`: the job's GRES vector vs each node's
+NON-ALLOCATED GRES counts) → allocation decrements consumable state →
+job/node state updates; priority ordering comes in from
+`priority/multifactor` before selection.
+
+**The central comparison answered:** inference-lab's PlacementGate is
+closer to a **filter with an estimator**; Slurm is a filter **plus a
+consumable-resource accounting system**. The differences:
+
+* Slurm tracks per-node *remaining* resources (allocated vs free) as
+  authoritative state that every scheduling decision decrements and every
+  job release restores; overcommit is an explicit policy knob
+  (`NODE_CR_RESERVED | ONE_ROW | AVAILABLE`). inference-lab's gate reads
+  current VRAM capability + one loaded model, but never *reserves* placed
+  capacity against future placements — our only reservation is ECT's
+  time-based `begin_work` estimate, which is about time, not memory.
+* Slurm filters and accounts against TOPOLOGY (sockets, GRES binding);
+  our gate is topology-free by design (one simulated GPU per worker).
+* Priority ordering sits BEFORE feasibility in Slurm's pipeline (queue
+  order → selection), where ours applies admission priority at the queue
+  and feasibility at selection — the same two concerns in the opposite
+  layering.
+
+**Adoption candidate (exactly one): a per-GPU placement ledger — memory
+reservations decremented on dispatch and restored on release.** With
+one-model-per-GPU residency it is mostly redundant today (which is why it
+is a candidate and not an implementation), but it is the missing piece
+that separates "is this request placeable" from "is this fleet
+schedulable", and it becomes necessary the moment a simulated GPU hosts
+two models. Accepted as a Phase-8 candidate, not implemented now: the
+current single-resident-model semantics make the ledger dead weight.
+**Rejected**: porting `job_test.c`'s topology/weight machinery — nothing
+in a one-GPU-per-worker fleet for it to weight.
+
+## Final synthesis — Phase 7
 
 ```text
 sbatch --gres=gpu:1 → slurmctld job manager → priority ordering
@@ -582,6 +698,19 @@ CORDONED/DRAINING.
   saturation detectors, usage limits) is what our single admission
   controller + service classes collapse into. Their taxonomy confirms our
   one-controller design covers the same decisions at lab scale.
+
+| Area | Production system | inference-lab | Verdict |
+| --- | --- | --- | --- |
+| Cache/routing | llm-d (EPP filter→scorer→picker, KV block index) | CacheAwareECT + prefix fingerprint + exploration | matched with a different cost basis: affinity vote (theirs) vs time-saved estimate (ours) |
+| Planning | Dynamo (planner: observe→decide→actuate) | scaler + fleet controller | mostly matched, more centralized; startup-guard adopted |
+| In-worker scheduling | vLLM (per-token budget, preemption-recompute) | pre-dispatch estimates + contention gate | intentionally different layer; their `long_prefill_token_threshold` is the knob our 4C stall needed |
+| Node/device lifecycle | GPU Operator (desired-state reconciliation) | NodeLifecycle + fleet gates | simplified but legible; responsibilities production splits are fused here — now documented |
+| GPU telemetry | dcgm-exporter (counter catalog, raw exposition) | mock DCGM (simulated fields + actuator) | matched on names/units/labels after normalization; measurement/interpretation/policy/action now explicitly separated |
+| Resource allocation | Slurm (cons_tres: filter + consumable accounting) | PlacementGate | filter + estimator, not accounting; per-GPU ledger is the named Phase-8 candidate |
+
+The closing answer to *what matched, what diverged, and why the
+simplifications were reasonable* is the table above plus the per-session
+records and the matched/diverged/justified section that precedes it.
 
 ## Cross-cutting differences (the part worth writing home about)
 
