@@ -47,6 +47,85 @@ consume *runtime-reported* KV events from vLLM — we simulate residency).
 Their plugin trait boundaries are the main lesson: our policies are
 compile-time enum arms; theirs are runtime plugins.
 
+### Session record 1 — llm-d (read 2026-09-28, repos at HEAD)
+
+Files actually read: `pkg/epp/scheduling/scheduler.go`,
+`scheduler_profile.go`, `weighted_scorer.go`,
+`framework/plugins/scheduling/scorer/prefix/plugin.go`,
+`filter/prefixcacheaffinity/plugin.go`, `scorer/loadaware/load_aware.go`,
+`scorer/nohitlru/no_hit_lru.go`, `requestcontrol/dataproducer/
+{preciseprefixcache,approximateprefix,prefixhash,inflightload,predictedlatency}/`,
+`llm-d-kv-cache/pkg/kvcache/{indexer.go,kvblock/index.go,kvblock_scorer.go}`.
+
+**Verified end-to-end path.** `cmd/epp/main.go` → Gateway-API extension
+handler → `Scheduler.Schedule` (scheduler.go:73): a *profile handler* picks
+profiles; each `SchedulerProfile` runs filters → scorers → picker;
+`WeightedScorer` (weighted_scorer.go:17) pairs each scorer with a weight;
+`ProcessResults` merges profile results. Prefix truth flows the other way:
+data *producers* (`requestcontrol/dataproducer/preciseprefixcache` —
+tokenize → hash KV-block keys → index lookup → per-endpoint
+`PrefixCacheMatchInfo`) publish into the datalayer, and scorers *consume*
+it (`Consumes()` declares `PrefixCacheMatchInfo`).
+
+**Step-by-step vs inference-lab:**
+
+| llm-d step | inference-lab analogue | difference |
+| --- | --- | --- |
+| `Scheduler.Schedule` profile pipeline (scheduler.go:73) | `Router::select_reserved_inner` | same idea, different implementation — profiles are runtime-configured plugin sets; ours are compile-time policy arms |
+| filters (health, utilization, prefix affinity) | `healthy_workers()` + `PlacementGate` | same idea, different implementation — their filters are also plugins; our placement gate is richer on memory/TP, theirs has none at this layer |
+| prefix scorer (prefix/plugin.go:120): `matchRatio = matchBlocks/totalBlocks`, optional quadratic absolute-length term | CacheAwareECT's `(prompt − reusable) × prefill_rate` priced into ECT | same goal, different math — they score 0-1 affinity for a weighted blend; we convert reuse into *time saved* inside an estimate. Ours needs the cost model theirs doesn't |
+| affinity FILTER (prefixcacheaffinity/plugin.go): threshold 0.80 → "sticky" set; exploration probability skips the gate; no-sticky → keep all; TTFT load gate BREAKS stickiness when `bestStickyTTFT − bestNonStickyTTFT > MaxTTFTPenaltyMs` | our bypass machinery: `scheduler_cache_affinity_bypassed_total{queue_pressure,prefill_pressure,…}` | production feature we lack (partially): an explicit sticky-set gate with exploration + a *measured-TTFT* override. We bypass on *predicted* cost; they override on *observed* TTFT |
+| load-aware scorer (loadaware/load_aware.go:96): queue depth → score in [0, 0.5] | least-outstanding + remaining-work ECT terms | same idea, different implementation — theirs is a bounded heuristic score blended by weight; ours is a work estimate folded into completion time |
+| picker (`maxscore`, `weightedrandom`) | argmin in policy arms | intentionally simpler on our side |
+| KV state: `llm-d-kv-cache` block index (`Lookup(keys, pods)`, in-memory HMA / Redis backends) fed by **vLLM KV events over ZMQ** (`pkg/kvevents/zmq_subscriber.go`) | per-slot cache investment model (ABSENT→POPULATING→RESIDENT) learned from our own dispatches + `cache_n` telemetry | production feature we lack: authoritative runtime eviction events. Our residency is inferred and can be wrong |
+| **two producers for the same truth**: `preciseprefixcache` (tokenize+hash exact blocks) vs `approximateprefix` (cheap approximation) | one prefix fingerprint (`DefaultHasher` on the first 4 KB of messages) | production feature we lack: an explicit accuracy/cost dial on cache knowledge |
+
+**The five questions, with evidence:**
+
+1. *How prefix/KV locality enters scoring* — as a normalised affinity
+   score (matchRatio, default; optional quadratic absolute-length term,
+   `matchLengthWeight`), produced by a data producer, consumed by a scorer,
+   then weighted against non-affinity scorers by profile-configured
+   weights. Locality is one *vote*, priced in ratio space — not, as in our
+   ECT, a time-saved term inside a completion-time estimate.
+2. *Where load overrides locality* — in TWO places: the affinity filter's
+   TTFT gate (if the sticky set's best *observed* TTFT is worse than the
+   non-sticky best by more than `MaxTTFTPenaltyMs`, the gate is broken and
+   all endpoints compete — `outcomeLoadOverride`), and the weighted blend
+   itself, where load scores pull a cached pod down.
+3. *Approximate vs authoritative state* — runtime KV events are the
+   authoritative layer (evictions are *reported by vLLM*, not guessed);
+   the router keeps an approximate index with two accuracy tiers
+   (precise tokenized-hash vs approximate) and treats match info as
+   advisory. Nothing in the router pretends to know a pod's cache.
+4. *How decisions are observable* — every filter/scorer/picker emits an
+   outcome record + OTel span attributes (`outcomeSticky`, `outcomeLoadOverride`,
+   `outcomeNoMatch`, `outcomeExploration`), per-extension-point latency
+   histograms, and the KV index has instrumented/traced wrappers. Directly
+   comparable to our `scheduler_decisions_total`, bypass counters, and
+   per-candidate decision tables — this is the closest match in the whole
+   phase.
+5. *Stale cache knowledge* — three mitigations: exploration probability
+   (occasionally ignore affinity to re-discover), no-sticky-keep-all (a
+   wrong threshold never empties the pool), and the `nohitlru` scorer (cold
+   requests — no hit anywhere — get scored by replica LRU, deliberately
+   spreading cache-cold traffic onto least-recently-used pods). Our
+   equivalent is the miss-completion demotion fix (52d29d2) and ECT's
+   natural spread of colds — weaker, and we learned the cold-serialization
+   trap the hard way in 4B.
+
+**Adoption candidate (exactly one): exploration probability on prefix
+affinity.** `CacheAwareECT` never re-considers a bypassed affinity decision
+at random; adding an `EXPLORATION_PROBABILITY` knob (default ~0.02) to the
+slot-cache affinity path would let a wrongly-trusted residency entry heal
+itself by occasionally dispatching against it — the exact failure mode of
+our inferred (not authoritative) residency. Accepted: ~20 lines in one
+policy arm + a bypass counter label, directly improves the control-plane
+story (self-healing cache knowledge), no new subsystem. **Rejected**:
+converting policies to runtime plugins (framework rewrite, no story gain)
+and a latency-predictor data producer (duplicates our calibrated cost
+model at 10× scope).
+
 ## Trace 2 — one request through NVIDIA Dynamo
 
 ```text
@@ -150,6 +229,58 @@ GRES bookkeeping `src/interfaces/gres.c` → priority
 placement gate — node-by-node "can this request's resource vector fit?"
 with GRES filtering. Our drain/resume lab exercises map 1:1 onto
 CORDONED/DRAINING.
+
+## Where inference-lab matched, diverged, and which simplifications were justified
+
+*Updated after each Phase-7 session. Current entries: llm-d (session 1).*
+
+**Matched (same concept, independently derived):**
+
+* Filter → score → pick as the routing pipeline's three phases; and — the
+  strongest match — *decision observability as a first-class output*
+  (their per-outcome filter records + spans vs our bypass counters +
+  per-candidate decision tables).
+* Cache-aware routing priced as a *trade*, not a rule: they weight an
+  affinity score against load scores; we fold cache savings into a
+  completion-time estimate and refuse reuse below a floor. Both systems
+  treat locality as advisory, never mandatory.
+* Load-awareness as queue state, and autoscaling on queue signals rather
+  than CPU (Dynamo's planner and our scaler agree on this from first
+  principles).
+* Cold-cache handling as a first-class case: their `nohitlru` scorer and
+  our ECT cold-spreading both exist because of the same failure — warm
+  affinity serializing cold traffic onto the wrong replicas.
+
+**Diverged (and why):**
+
+* *Source of cache truth.* llm-d consumes authoritative KV events from the
+  runtime (vLLM reports block eviction over ZMQ); we infer residency from
+  our own dispatches. Ours is approximate by construction — defensible
+  only because our mock worker *is* the runtime and can be wrong in
+  realistic ways (that's the wedge/empty-completion family).
+* *Units of routing currency.* They score in normalized affinity space and
+  blend with weights; we price in milliseconds and pick the argmin. Their
+  weights are operational knobs; our estimates are calibrated against
+  measured TTFT (4B.3) with prediction-error telemetry — more machinery,
+  but it answers "how wrong was the routing decision" numerically.
+* *Scope of the gate.* Their affinity filter is a single threshold gate
+  with escape hatches; our placement gate is a resource-feasibility check
+  (memory/TP/accelerator). Different problems sharing a pipeline position —
+  llm-d assumes capacity exists (K8s scheduled the pods); we simulate the
+  capacity decision too.
+
+**Justified simplifications:**
+
+* Compile-time policy arms instead of runtime plugin registries — one
+  developer, one process, zero need for third-party policies. Revisit only
+  if policies multiply.
+* Simulated residency instead of a KV-event consumer — a real event
+  consumer needs a real runtime emitting events; on Metal, mlx-lm/llama.cpp
+  offer partial telemetry (`cache_n`), which we already consume.
+* No flow-control framework: llm-d's flowcontrol tree (fairness, ordering,
+  saturation detectors, usage limits) is what our single admission
+  controller + service classes collapse into. Their taxonomy confirms our
+  one-controller design covers the same decisions at lab scale.
 
 ## Cross-cutting differences (the part worth writing home about)
 
