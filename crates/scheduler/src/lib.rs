@@ -76,7 +76,7 @@ use inference_lab_worker_lifecycle::{
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 pub mod calibration;
@@ -915,7 +915,10 @@ impl WorkerHandle {
 // ---------------------------------------------------------------------------
 
 pub struct Router {
-    workers: Vec<Arc<WorkerHandle>>,
+    /// The schedulable registry. Behind a lock so the Kubernetes discovery
+    /// watcher can add and remove workers while traffic flows: handles are
+    /// `Arc`s, so an in-flight stream keeps its worker alive across removal.
+    workers: RwLock<Vec<Arc<WorkerHandle>>>,
     policy: RoutingPolicy,
     config: RouterConfig,
     /// Serializes selection+reservation so a concurrent burst cannot send
@@ -937,11 +940,40 @@ impl Router {
         if workers.is_empty() {
             anyhow::bail!("router needs at least one worker");
         }
-        Ok(Self { workers, policy, config, select_lock: Mutex::new(()) })
+        Ok(Self { workers: RwLock::new(workers), policy, config, select_lock: Mutex::new(()) })
     }
 
-    pub fn workers(&self) -> &[Arc<WorkerHandle>] {
-        &self.workers
+    /// Empty registry for dynamic discovery (the k3d phase): workers join
+    /// and leave at runtime as the watcher syncs Kubernetes state. Traffic
+    /// before the first sync gets `AllUnhealthy`, which is honest.
+    pub fn dynamic(policy: RoutingPolicy, config: RouterConfig) -> Self {
+        Self { workers: RwLock::new(Vec::new()), policy, config, select_lock: Mutex::new(()) }
+    }
+
+    /// Snapshot of the registry. The returned `Vec` owns its `Arc`s, so
+    /// callers can keep workers alive across a concurrent discovery update.
+    pub fn workers(&self) -> Vec<Arc<WorkerHandle>> {
+        self.workers.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Register a discovered worker. `false` when an id collision exists
+    /// (the registry keeps the original).
+    pub fn add_worker(&self, handle: Arc<WorkerHandle>) -> bool {
+        let mut guard = self.workers.write().unwrap_or_else(|e| e.into_inner());
+        if guard.iter().any(|w| w.id == handle.id) {
+            return false;
+        }
+        guard.push(handle);
+        true
+    }
+
+    /// Remove a worker whose backing pod is gone. In-flight streams hold
+    /// their own `Arc` and finish; the orphaned handle's lifecycle runs to
+    /// STOPPED on their last `dec_outstanding`.
+    pub fn remove_worker(&self, id: &str) -> Option<Arc<WorkerHandle>> {
+        let mut guard = self.workers.write().unwrap_or_else(|e| e.into_inner());
+        let pos = guard.iter().position(|w| w.id == id)?;
+        Some(guard.remove(pos))
     }
 
     pub fn policy(&self) -> RoutingPolicy {
@@ -952,9 +984,12 @@ impl Router {
         self.config
     }
 
-    /// Healthy workers only (empty slice means "nobody home").
+    /// Healthy workers only (empty vec means "nobody home").
     pub fn healthy_workers(&self) -> Vec<Arc<WorkerHandle>> {
-        self.workers.iter().filter(|w| w.is_healthy()).cloned().collect()
+        self.workers()
+            .into_iter()
+            .filter(|w| w.is_healthy())
+            .collect()
     }
 
     /// Pick the worker for a request WITHOUT reserving work (compat path
@@ -1032,7 +1067,7 @@ impl Router {
         if !self.config.contention_gate {
             return None;
         }
-        Some(self.workers.first()?.calibration().contention_notify())
+        Some(self.workers.read().unwrap_or_else(|e| e.into_inner()).first()?.calibration().contention_notify())
     }
 
     /// The hold cap for one gate hold (`None` = gate off).

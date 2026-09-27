@@ -19,7 +19,7 @@ use crate::admission::{AdmissionPermit, TokenEstimator};
 use crate::metrics::Metrics;
 use futures_util::{Stream, StreamExt};
 use inference_lab_protocol::{chunk_text, ChatCompletionChunk, Usage};
-use inference_lab_scheduler::{DispatchTicket, WorkerHandle};
+use inference_lab_scheduler::{DispatchTicket, ServiceClass, WorkerHandle};
 use inference_lab_streaming::SseParser;
 use inference_lab_worker_lifecycle::{Dimension, FailureReason};
 use opentelemetry::trace::TraceContextExt;
@@ -222,6 +222,11 @@ pub struct StreamCtx {
     pub work_estimate: DispatchTicket,
     /// Total estimated service time for saved-compute accounting.
     pub est_total_ms: f64,
+    /// Requested service class. Interactive violations of the TTFT SLO
+    /// (below) are the autoscaler's quality signal (phase 5).
+    pub service_class: ServiceClass,
+    /// The interactive TTFT SLO; `None` = off (INTERACTIVE_SLO_TTFT_S=0).
+    pub interactive_slo: Option<Duration>,
 }
 
 pub struct InFlightGuard(pub Arc<Metrics>);
@@ -515,6 +520,27 @@ impl<S> InstrumentedStream<S> {
         if matches!(outcome, Outcome::Completed) {
             if let (Some(dec), 2..) = (tl.decode_phase(), tl.output_tokens) {
                 w.record_decode(tl.output_tokens, dec.as_secs_f64() * 1000.0, &self.ctx.work_estimate);
+            }
+        }
+
+        // Interactive SLO accounting (phase 5): the autoscaler scales on
+        // THIS, never on CPU. A first-token timeout is a violation with no
+        // TTFT to compare — it missed by definition.
+        if self.ctx.service_class == ServiceClass::Interactive {
+            let violated = match (self.ctx.interactive_slo, outcome) {
+                (Some(_), Outcome::FirstTokenTimeout) => true,
+                (Some(slo), _) => tl.ttft().map(|t| t > slo).unwrap_or(false),
+                (None, _) => false,
+            };
+            if violated {
+                m.interactive_slo_violations_total
+                    .with_label_values(&[w.id.as_str()])
+                    .inc();
+                tracing::warn!(
+                    worker = %w.id,
+                    ttft_ms = ?tl.ttft().map(|d| d.as_millis()),
+                    "interactive SLO violated"
+                );
             }
         }
 
@@ -817,6 +843,8 @@ mod tests {
             stream_mode: true,
             work_estimate,
             est_total_ms: 100.0,
+            service_class: inference_lab_scheduler::ServiceClass::Standard,
+            interactive_slo: None,
         };
         (metrics, ctx)
     }

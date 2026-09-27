@@ -211,6 +211,21 @@ pub struct Metrics {
     /// phase-4A proof that a clean HTTP answer can still be a failed
     /// inference.
     pub empty_completions_total: IntCounterVec,
+
+    // -- kubernetes operations (phase 5) ----------------------------------------
+    /// Interactive-class requests whose first token missed the SLO
+    /// (`INTERACTIVE_SLO_TTFT_S`, default 5 s) or never arrived. The
+    /// autoscaler's quality signal — never CPU utilization.
+    pub interactive_slo_violations_total: IntCounterVec,
+    /// Worker is currently an active (ready) endpoint of its Kubernetes
+    /// Service. Observed, not obeyed: the lifecycle controller stays
+    /// authoritative for routing (a NotReady pod stays registered so its
+    /// recovery can be probed and it can re-enter service).
+    pub worker_in_service: IntGaugeVec,
+    /// Workers currently in the dynamic registry.
+    pub discovery_workers: IntGauge,
+    /// Registry changes by action: added | removed | updated.
+    pub discovery_events_total: IntCounterVec,
 }
 
 impl Metrics {
@@ -642,6 +657,36 @@ impl Metrics {
             &["worker"],
         )?;
 
+        // Phase 5 (kubernetes operations).
+        let interactive_slo_violations_total = IntCounterVec::new(
+            Opts::new(
+                "inference_interactive_slo_violations_total",
+                "Interactive-class requests whose TTFT missed INTERACTIVE_SLO_TTFT_S \
+                 (or never produced a first token)",
+            ),
+            &["worker"],
+        )?;
+        let worker_in_service = gauge_vec(
+            "gateway_worker_in_service",
+            "Worker is a ready endpoint of its Kubernetes Service (observed; \
+             routing remains lifecycle-authoritative)",
+            &["worker"],
+        )?;
+        let discovery_workers = IntGauge::new(
+            "gateway_discovery_workers",
+            "Workers currently in the registry via kubernetes discovery",
+        )?;
+        let discovery_events_total = IntCounterVec::new(
+            Opts::new(
+                "gateway_discovery_events_total",
+                "Dynamic-registry changes by action",
+            ),
+            &["action"],
+        )?;
+        for action in ["added", "removed", "updated"] {
+            discovery_events_total.with_label_values(&[action]);
+        }
+
         reg!(registry, requests_total);
         reg!(registry, requests_in_flight);
         reg!(registry, input_tokens_total);
@@ -711,6 +756,10 @@ impl Metrics {
         reg!(registry, scheduler_observed_reused_tokens_total);
         reg!(registry, worker_cache_state);
         reg!(registry, worker_cache_tokens);
+        reg!(registry, interactive_slo_violations_total);
+        reg!(registry, worker_in_service);
+        reg!(registry, discovery_workers);
+        reg!(registry, discovery_events_total);
 
         Ok(Self {
             registry,
@@ -783,6 +832,10 @@ impl Metrics {
             scheduler_observed_reused_tokens_total,
             worker_cache_state,
             worker_cache_tokens,
+            interactive_slo_violations_total,
+            worker_in_service,
+            discovery_workers,
+            discovery_events_total,
         })
     }
 

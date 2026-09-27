@@ -46,7 +46,21 @@
 //! Config (env):
 //! * `GATEWAY_ADDR`       listen address            (default 0.0.0.0:8080)
 //! * `WORKERS` — `name=url[,name=url...]`, optional `#model` suffix
-//!   (default mlx=http://127.0.0.1:8082)
+//!   (default mlx=http://127.0.0.1:8082). Ignored under kubernetes
+//!   discovery.
+//! * `WORKER_DISCOVERY`  `kubernetes` = build the registry by watching
+//!   pods + endpoints instead of the static `WORKERS` list (phase 5).
+//! * `K8S_NAMESPACE` / `WORKER_SELECTOR` / `WORKER_DISCOVERY_POLL_S` /
+//!   `WORKER_PORT` / `WORKER_PORT_NAME` — discovery knobs (namespace
+//!   defaults to the pod's ServiceAccount; selector defaults to
+//!   `inference-lab.io/worker=true`; poll 2 s; port 8080 named `http`).
+//! * `EXTERNAL_WORKERS` — same format as `WORKERS`: workers outside the
+//!   cluster (the native macOS Metal worker, reached via
+//!   `host.docker.internal`), registered once at startup alongside
+//!   discovery in either mode.
+//! * `INTERACTIVE_SLO_TTFT_S`  interactive-class first-token SLO; misses
+//!   count on `inference_interactive_slo_violations_total` (default 5,
+//!   0 = off). The autoscaler's quality signal.
 //! * `WORKER_SLOTS`       model each upstream as N llama.cpp slots (default 0)
 //! * `ROUTE_POLICY`       lor | ect | prefix-affinity | native | least-work |
 //!   prefix-only | cache-aware-ect  (default lor)
@@ -86,6 +100,7 @@
 //! * `OTEL_EXPORTER_OTLP_ENDPOINT`  enables OTLP export (e.g. http://127.0.0.1:4318)
 
 mod admission;
+mod discovery;
 mod lifecycle;
 mod metrics;
 mod proxy;
@@ -128,6 +143,14 @@ struct AppState {
     /// One entry per modeled server process: its shared, persisting
     /// performance calibration (all slot handles of a server share the Arc).
     calibrations: Vec<ServerCalibration>,
+    /// Kubernetes discovery: the Service-endpoint membership snapshot plus
+    /// lazily-grown calibrations for dynamically discovered workers.
+    discovery: Arc<discovery::DiscoveryState>,
+    dyn_cals: std::sync::Mutex<std::collections::HashMap<String, Arc<RuntimeCalibration>>>,
+    cal_machine: String,
+    service_defaults: ServiceDefaults,
+    /// Interactive TTFT SLO (None = off).
+    interactive_slo: Option<Duration>,
 }
 
 /// A server calibration plus where it persists.
@@ -290,10 +313,10 @@ fn prefix_hash(req: &ChatCompletionRequest) -> u64 {
 /// routing must never carry opinions from different models.
 fn est_work_ms(st: &AppState, est_in: u64, out_tok: u64) -> f64 {
     let healthy = st.router.healthy_workers();
-    let candidates: &[Arc<WorkerHandle>] = if healthy.is_empty() {
+    let candidates: Vec<Arc<WorkerHandle>> = if healthy.is_empty() {
         st.router.workers()
     } else {
-        &healthy
+        healthy
     };
     candidates
         .iter()
@@ -751,6 +774,8 @@ async fn chat_completions(
         stream_mode,
         work_estimate: work_start,
         est_total_ms: est_total,
+        service_class,
+        interactive_slo: st.interactive_slo,
     };
 
     let stream = InstrumentedStream::new(resp.bytes_stream(), ctx);
@@ -816,6 +841,7 @@ async fn status(State(st): State<Arc<AppState>>) -> Response {
                     .last_success
                     .map(|t| t.elapsed().as_secs_f64()),
                 "outstanding": w.outstanding(),
+                "in_service": st.discovery.in_service(&w.id),
                 "prefill_ms_per_token": w.prefill_ms_per_tok(),
                 "fixed_overhead_ms": w.fixed_overhead_ms(),
                 "decode_ms_per_token": w.decode_ms_per_tok(),
@@ -922,7 +948,8 @@ async fn status(State(st): State<Arc<AppState>>) -> Response {
 /// worker's lifecycle moves READY/DEGRADED → DRAINING, and once the last
 /// outstanding request completes, DRAINING → STOPPED.
 async fn drain_worker(State(st): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let Some(w) = st.router.workers().iter().find(|w| w.id == id) else {
+    let workers = st.router.workers();
+    let Some(w) = workers.iter().find(|w| w.id == id) else {
         return error_json(StatusCode::NOT_FOUND, &format!("unknown worker {id}"));
     };
     let transitions = w.drain();
@@ -937,10 +964,50 @@ async fn drain_worker(State(st): State<Arc<AppState>>, Path(id): Path<String>) -
     .into_response()
 }
 
+/// The Kubernetes readiness contract (phase 5): the gateway's lifecycle
+/// controller stays authoritative. READY/DEGRADED are the only routable
+/// states; STARTING/WARMING/UNHEALTHY/RECOVERING/DRAINING/STOPPED all map
+/// to readiness false. Worker pods point their readinessProbe at this
+/// handler (through the gateway Service), so a pod leaves its Service
+/// endpoints exactly when the router would stop picking it — and re-enters
+/// when recovery completes. The acceptance contract is unchanged: this is
+/// driven by the real functional generation probe, never `/health == 200`.
+fn routable(state: WorkerState) -> bool {
+    matches!(state, WorkerState::Ready | WorkerState::Degraded)
+}
+
+/// Readiness endpoint for the worker pods' readinessProbe. Fail-closed: an
+/// unknown worker is never ready.
+async fn worker_readiness(State(st): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let workers = st.router.workers();
+    let Some(w) = workers.iter().find(|w| w.id == id) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"worker": id, "state": "unknown", "ready": false})),
+        )
+            .into_response();
+    };
+    let cond = w.condition();
+    let ready = routable(cond.state);
+    let status = if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    (
+        status,
+        Json(serde_json::json!({
+            "worker": w.id,
+            "state": cond.state.as_str(),
+            "reason": cond.reason.map(|r| r.as_str()),
+            "generation": cond.generation,
+            "ready": ready,
+        })),
+    )
+        .into_response()
+}
+
 /// Run one functional probe immediately (the readiness contract: a tiny
 /// real generation). Useful after config changes and in tests.
 async fn probe_worker(State(st): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let Some(w) = st.router.workers().iter().find(|w| w.id == id) else {
+    let workers = st.router.workers();
+    let Some(w) = workers.iter().find(|w| w.id == id) else {
         return error_json(StatusCode::NOT_FOUND, &format!("unknown worker {id}"));
     };
     let (obs, dur) = lifecycle::run_functional_probe(&st.client, w, &st.lifecycle_cfg).await;
@@ -982,7 +1049,8 @@ async fn root() -> Response {
         "service": "inference-lab gateway",
         "endpoints": [
             "/v1/chat/completions", "/v1/models", "/healthz", "/status", "/metrics",
-            "/admin/workers/{id}/drain", "/admin/workers/{id}/probe"
+            "/admin/workers/{id}/drain", "/admin/workers/{id}/probe",
+            "/admin/workers/{id}/readiness"
         ],
     }))
     .into_response()
@@ -1139,7 +1207,11 @@ async fn gauge_sampler(st: Arc<AppState>) {
                 .with_label_values(&[id])
                 .set(cond.consecutive_failures as i64);
             m.worker_generation.with_label_values(&[id]).set(cond.generation as i64);
+            m.worker_in_service
+                .with_label_values(&[id])
+                .set(st.discovery.in_service(id) as i64);
         }
+        m.discovery_workers.set(st.router.workers().len() as i64);
     }
 }
 
@@ -1172,8 +1244,25 @@ async fn main() -> anyhow::Result<()> {
     let telemetry_guard = telemetry::init(env!("CARGO_PKG_VERSION"))?;
 
     let addr = std::env::var("GATEWAY_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
-    let workers_spec =
-        std::env::var("WORKERS").unwrap_or_else(|_| "mlx=http://127.0.0.1:8082".into());
+    // Phase 5: kubernetes discovery replaces the static WORKERS list. The
+    // registry starts empty; pods carrying the worker selector register
+    // themselves via their labels. EXTERNAL_WORKERS bridges out-of-cluster
+    // workers (the native macOS Metal runtime) in both modes.
+    let discovery_enabled = discovery::DiscoveryConfig::enabled();
+    let external_spec = std::env::var("EXTERNAL_WORKERS").unwrap_or_default();
+    let workers_spec = if discovery_enabled {
+        std::env::var("WORKERS").unwrap_or_default()
+    } else {
+        std::env::var("WORKERS").unwrap_or_else(|_| "mlx=http://127.0.0.1:8082".into())
+    };
+    let static_spec = if discovery_enabled {
+        external_spec
+    } else if external_spec.is_empty() {
+        workers_spec.clone()
+    } else {
+        format!("{workers_spec},{external_spec}")
+    };
+    let discovery_cfg = discovery::DiscoveryConfig::from_env()?;
     let policy = inference_lab_scheduler::RoutingPolicy::parse(
         &std::env::var("ROUTE_POLICY").unwrap_or_else(|_| "lor".into()),
     )
@@ -1208,7 +1297,7 @@ async fn main() -> anyhow::Result<()> {
         // One calibration per DISTINCT upstream (model+url); several names
         // pointing at the same server would double-count its streams.
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for (name, url, model) in parse_workers(&workers_spec) {
+        for (name, url, model) in parse_workers(&static_spec) {
             let server = format!("{url}\u{0}{model}");
             if !seen.insert(server.clone()) {
                 continue;
@@ -1243,7 +1332,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut handles: Vec<Arc<WorkerHandle>> = Vec::new();
-    for (name, url, model) in parse_workers(&workers_spec) {
+    for (name, url, model) in parse_workers(&static_spec) {
         let runtime = name.split('-').next().unwrap_or("unknown").to_string();
         // Handles of the same server share one calibration (fall back to a
         // private one when persistence is off).
@@ -1304,7 +1393,17 @@ async fn main() -> anyhow::Result<()> {
         contention_gate: std::env::var("ADMIT_MARGINAL_COST").ok().as_deref() == Some("1"),
         gate_max_hold_s: env_f64("CONTENTION_GATE_MAX_HOLD_S", 20.0),
     };
-    let router = Arc::new(WorkerRouter::with_config(handles, policy, router_config)?);
+    let router = Arc::new(if discovery_enabled {
+        let r = WorkerRouter::dynamic(policy, router_config);
+        for h in &handles {
+            if r.add_worker(h.clone()) {
+                tracing::info!(worker = %h.id, endpoint = %h.endpoint, "registered external worker");
+            }
+        }
+        r
+    } else {
+        WorkerRouter::with_config(handles, policy, router_config)?
+    });
     if router_config.contention_gate {
         tracing::info!(
             max_hold_s = router_config.gate_max_hold_s,
@@ -1319,6 +1418,7 @@ async fn main() -> anyhow::Result<()> {
     let admission = AdmissionController::new(admission_policy);
     let first_token_timeout = env_f64("FIRST_TOKEN_TIMEOUT_S", 0.0);
     let stream_stall_timeout = env_f64("STREAM_STALL_TIMEOUT_S", 0.0);
+    let interactive_slo_s = env_f64("INTERACTIVE_SLO_TTFT_S", 5.0);
     let lifecycle_cfg = lifecycle::LifecycleConfig::from_env();
     let state = Arc::new(AppState {
         router: router.clone(),
@@ -1334,8 +1434,17 @@ async fn main() -> anyhow::Result<()> {
             .then(|| Duration::from_secs_f64(stream_stall_timeout)),
         lifecycle_cfg: lifecycle_cfg.clone(),
         calibrations,
+        discovery: Arc::new(discovery::DiscoveryState::default()),
+        dyn_cals: std::sync::Mutex::new(std::collections::HashMap::new()),
+        cal_machine: cal_machine.clone(),
+        service_defaults,
+        interactive_slo: (interactive_slo_s > 0.0)
+            .then(|| Duration::from_secs_f64(interactive_slo_s)),
     });
 
+    if discovery_enabled {
+        tokio::spawn(discovery::discovery_loop(state.clone(), discovery_cfg));
+    }
     let health_interval = Duration::from_secs_f64(env_f64("HEALTH_INTERVAL_S", 5.0).max(0.5));
     tokio::spawn(gauge_sampler(state.clone()));
     tokio::spawn(lifecycle::transport_poller(state.clone(), health_interval));
@@ -1354,6 +1463,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/admin/workers/{id}/drain", post(drain_worker))
         .route("/admin/workers/{id}/probe", post(probe_worker))
+        .route("/admin/workers/{id}/readiness", get(worker_readiness))
         .with_state(state.clone());
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
