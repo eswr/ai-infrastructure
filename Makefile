@@ -10,7 +10,7 @@ MOCK_IMAGE ?= inference-lab/mock-worker:phase5
         experiment-admission-saturation experiment-cross-runtime experiment-prefix-cache \
         experiment-prefix-router experiment-serving-interactions \
         worker-mlx worker-llama worker-vllm worker-mock gateway \
-        up down obs-logs k8s k8s-images k8s-up k8s-deploy k8s-render k8s-check k8s-bridge-check \
+        up down obs-logs k8s k8s-images k8s-up k8s-deploy k8s-render k8s-check k8s-demo k8s-bridge-check \
         k8s-status k8s-down
 
 setup:            ## fresh-checkout bootstrap: toolchain checks + workspace build
@@ -140,6 +140,9 @@ k8s-deploy: k8s-render ## re-apply manifests to an existing cluster
 
 k8s-check:       ## the six short k8s acceptance scenarios (minutes, mock workers only)
 	python3 benchmarks/k8s/run_k8s_check.py
+
+k8s-demo:        ## the six-beat phase-5 demo (pods, autoscale, wedge, recover, drain, bridge) — under 5 min
+	python3 benchmarks/k8s/run_demo.py
 
 k8s-bridge-check: ## one native Metal worker + gateway in k3d + 4 concurrent short requests
 	python3 benchmarks/k8s/run_bridge_check.py
