@@ -1,12 +1,30 @@
 # inference-lab
 
-> A production-style LLM inference platform built and benchmarked on Apple
-> Silicon: pluggable inference runtimes, OpenAI-compatible streaming, and a
-> Rust gateway that does what a real inference gateway does — token
-> estimation, work-based admission control, an adaptive estimated-completion
-> scheduler, request-level tracing, and cancellation-safe streaming — with a
-> Rust load generator measuring TTFT / ITL / TPOT under controlled workloads,
-> an automated failure-injection suite, and a full local observability stack.
+**A production inference control-plane lab.** A Rust gateway (admission
+control, calibrated scheduling, cache-aware routing, functional worker
+readiness) proven under real Apple-Silicon inference, then extended into
+Kubernetes operations, a simulated datacenter control plane, and a
+source-level comparison against llm-d, Dynamo, vLLM, GPU Operator,
+dcgm-exporter and Slurm.
+
+**Results first:**
+
+* discovered MLX long-context saturation and silent-wedge behavior under
+  concurrent load
+* built token-budget admission control that turned the same saturation
+  workload from **0/16 delivered → 16/16 delivered**
+* measured cache-locality economics (warm TTFT ×24.7) and the cold-burst
+  trap, then built load-gated cache routing with learned cost calibration
+  (routing prediction MAE **−37%**)
+* protected mixed interactive/batch workloads that otherwise wedged
+  llama-server for hours (interactive TTFT p50 118 s → 47.7 s)
+* built Kubernetes worker discovery, functional readiness, graceful
+  draining, queue-signal autoscaling, and a k3d→native-Metal bridge
+* simulated heterogeneous H100/L40S/A10 placement (TP groups, VRAM
+  accounting, KV bounds) and GPU failure drills (XID/thermal/OOM) with
+  differentiated control-plane responses
+* mapped the whole design against production systems at source —
+  [architecture-mapping.md](docs/architecture-mapping.md)
 
 Models and workers run **natively on macOS** (Metal GPU, unified memory);
 infrastructure services run in Docker. That split mirrors a real datacenter's
@@ -150,12 +168,27 @@ docs/          architecture · benchmark-methodology · failure-testing ·
       maintenance/failed/recovering), failure exercises (XID, thermal, OOM)
       — `make fleet-check`; Slurm batch-side lab with FAKE GRES GPUs
       (`make slurm-up` / `slurm-demo`) — tag `phase-6-datacenter-control-plane`
-- [ ] Phase 7 — architecture/source study against production systems
+- [x] Phase 7 — architecture/source study against production systems
       (llm-d, NVIDIA Dynamo, vLLM, GPU Operator, dcgm-exporter, Slurm):
       one execution-path trace each, mapped back to inference-lab in
-      [docs/architecture-mapping.md](docs/architecture-mapping.md), plan
-      and verified repo paths in
-      [docs/phase7-reading-plan.md](docs/phase7-reading-plan.md)
+      [docs/architecture-mapping.md](docs/architecture-mapping.md) with
+      final synthesis table; two tiny adoptions implemented (exploration
+      probability on inferred cache affinity; scaler startup guard),
+      two interface contracts defined (runtime scheduler-state, node
+      conditions) — tag `phase-7-production-architecture-mapping`
+- [ ] Phase 8 — consumable accelerator placement accounting (the one
+      candidate kept from the Phase-7 review): per-GPU reservation ledger
+      (reserved VRAM, allocation lifecycle, atomic TP reservations) —
+      turns the PlacementGate from filter + estimator into filter +
+      estimator + accounting. Everything else stays frozen.
+
+**Portfolio entry points:**
+[docs/portfolio-architecture.md](docs/portfolio-architecture.md) (the
+one-page narrative and evidence tiers) ·
+[docs/interview-walkthrough.md](docs/interview-walkthrough.md) (three
+incidents, 10 minutes) ·
+[docs/architecture-mapping.md](docs/architecture-mapping.md) (production
+comparison)
 
 ## Scope: measured vs simulated
 
