@@ -242,6 +242,36 @@ fn reconcile(st: &Arc<AppState>) {
 /// Critical XID codes: DOUBLE_BIT_ECC-style errors that fail a node.
 const CRITICAL_XIDS: [f64; 4] = [48.0, 74.0, 79.0, 95.0];
 
+/// Parse the DCGM exposition text into per-GPU (xid, temp_c, fb_used_mib).
+///
+/// The value is the token after the LAST space: label values may contain
+/// spaces (real dcgm-exporter emits `modelName="NVIDIA H100 80GB HBM3"`),
+/// so a first-space split truncates the series and drops every line.
+pub fn parse_dcgm_series(text: &str) -> HashMap<String, (f64, f64, f64)> {
+    let mut per_gpu: HashMap<String, (f64, f64, f64)> = HashMap::new();
+    for line in text.lines() {
+        let Some((series, value)) = line.rsplit_once(' ') else { continue };
+        if !series.starts_with("DCGM_FI_DEV_") {
+            continue;
+        }
+        // dcgm-exporter label semantics: gpu=<index>, UUID=<device uuid>.
+        // Correlate on the UUID — the worker's simulated GPU identity.
+        let Some(uuid) = series.split("UUID=\"").nth(1).and_then(|r| r.split('"').next()) else {
+            continue;
+        };
+        let Ok(v) = value.trim().parse::<f64>() else { continue };
+        let e = per_gpu.entry(uuid.to_string()).or_insert((0.0, 0.0, 0.0));
+        if series.starts_with("DCGM_FI_DEV_XID_ERRORS{") {
+            e.0 = v;
+        } else if series.starts_with("DCGM_FI_DEV_GPU_TEMP{") {
+            e.1 = v;
+        } else if series.starts_with("DCGM_FI_DEV_FB_USED{") {
+            e.2 = v;
+        }
+    }
+    per_gpu
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn apply_telemetry(
     st: &Arc<AppState>,
@@ -253,28 +283,7 @@ async fn apply_telemetry(
     xid_seen: &mut HashMap<String, f64>,
 ) -> anyhow::Result<()> {
     let text = http.get(url).send().await?.error_for_status()?.text().await?;
-    // DCGM-shaped series: DCGM_FI_DEV_X{...gpu="UUID"...} value
-    let mut per_gpu: HashMap<&str, (f64, f64, f64)> = HashMap::new(); // (xid, temp, fb_used)
-    for line in text.lines() {
-        let Some((series, value)) = line.split_once(' ') else { continue };
-        if !series.starts_with("DCGM_FI_DEV_") {
-            continue;
-        }
-        // dcgm-exporter label semantics: gpu=<index>, UUID=<device uuid>.
-        // Correlate on the UUID — the worker's simulated GPU identity.
-        let Some(uuid) = series.split("UUID=\"").nth(1).and_then(|r| r.split('"').next()) else {
-            continue;
-        };
-        let Ok(v) = value.trim().parse::<f64>() else { continue };
-        let e = per_gpu.entry(uuid).or_insert((0.0, 0.0, 0.0));
-        if series.starts_with("DCGM_FI_DEV_XID_ERRORS{") {
-            e.0 = v;
-        } else if series.starts_with("DCGM_FI_DEV_GPU_TEMP{") {
-            e.1 = v;
-        } else if series.starts_with("DCGM_FI_DEV_FB_USED{") {
-            e.2 = v;
-        }
-    }
+    let per_gpu = parse_dcgm_series(&text);
 
     let workers = st.router.workers();
     for w in &workers {
@@ -361,4 +370,47 @@ pub fn admin_action(st: &AppState, node: &str, action: &str) -> Result<(NodeStat
     }
     let state = st.nodes.state_of(node);
     Ok((state, format!("{} -> {}", t[0].from.as_str(), t[0].to.as_str())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_dcgm_series_with_spaces_in_label_values() {
+        // Real dcgm-exporter emits label values with spaces
+        // (modelName="NVIDIA H100 80GB HBM3"); the value is the token
+        // after the LAST space. A first-space split turns the value into
+        // `H100`, drops every line, and the controller goes blind — the
+        // failure mode this test pins.
+        let text = "\
+# HELP DCGM_FI_DEV_GPU_TEMP GPU temperature (in C) [simulation=true]
+# TYPE DCGM_FI_DEV_GPU_TEMP gauge
+DCGM_FI_DEV_GPU_TEMP{gpu=\"0\",UUID=\"gpu-a\",device=\"nvidia0\",modelName=\"NVIDIA H100 80GB HBM3\",Hostname=\"node-gpu-01\",simulation=\"true\"} 94.0
+DCGM_FI_DEV_FB_USED{gpu=\"0\",UUID=\"gpu-a\",device=\"nvidia0\",modelName=\"NVIDIA H100 80GB HBM3\",Hostname=\"node-gpu-01\",simulation=\"true\"} 4915.2
+DCGM_FI_DEV_XID_ERRORS{gpu=\"0\",UUID=\"gpu-a\",device=\"nvidia0\",modelName=\"NVIDIA H100 80GB HBM3\",Hostname=\"node-gpu-01\",simulation=\"true\"} 48
+DCGM_FI_DEV_GPU_TEMP{gpu=\"1\",UUID=\"gpu-b\",device=\"nvidia1\",modelName=\"NVIDIA L40S\",Hostname=\"node-gpu-02\",simulation=\"true\"} 42.5
+";
+        let parsed = parse_dcgm_series(text);
+        assert_eq!(parsed.len(), 2, "two GPUs parsed");
+        let (xid, temp, fb_mib) = parsed["gpu-a"];
+        assert_eq!(xid, 48.0);
+        assert_eq!(temp, 94.0);
+        assert_eq!(fb_mib, 4915.2);
+        let (_, temp_b, _) = parsed["gpu-b"];
+        assert_eq!(temp_b, 42.5);
+    }
+
+    #[test]
+    fn ignores_unparseable_and_non_device_lines() {
+        let text = "\
+DCGM_FI_PROF_PCIE_TX_BYTES{UUID=\"gpu-a\",simulation=\"true\"} 1.2e6
+DCGM_FI_DEV_GPU_TEMP{UUID=\"gpu-b\"} not-a-number
+garbage line without braces 5
+";
+        let parsed = parse_dcgm_series(text);
+        // Only DCGM_FI_DEV_* families are interpreted; PROF_* lines and
+        // unparseable values never create entries.
+        assert!(parsed.is_empty());
+    }
 }
