@@ -49,14 +49,15 @@ def load_profile(study: Path) -> dict | None:
 
 
 def leg_summary(leg_dir: Path) -> dict | None:
-    """The measured run's summary from a leg's matrix.json."""
-    for name in ("matrix.json",):
-        p = leg_dir / name
-        if p.exists():
-            rows = [r for r in json.loads(p.read_text()).get("rows", [])
-                    if not r.get("warmup")]
-            if rows:
-                return rows[-1].get("summary", {})
+    """The measured run's summary from a leg's matrix.json (loadgen nests
+    it one level down in a <study>-<timestamp>/ directory)."""
+    matches = sorted(set(leg_dir.glob("matrix.json"))
+                     | set(leg_dir.glob("*/matrix.json")))
+    for p in matches:
+        rows = [r for r in json.loads(p.read_text()).get("rows", [])
+                if not r.get("warmup")]
+        if rows:
+            return rows[-1].get("summary", {})
     return None
 
 

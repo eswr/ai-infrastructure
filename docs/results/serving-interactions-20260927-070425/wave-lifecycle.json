@@ -1,0 +1,512 @@
+{
+  "study": "serving-interactions-4c",
+  "created": "20260927-014857",
+  "runtime": "llama-cpp",
+  "model": "Qwen3.5-9B-Q4_K_M.gguf",
+  "question": "phase-4C: measure accelerator contention as a first-class resource \u2014 prefill slowdown vs aggregate throughput per concurrent level, decode scaling, and prefill->decode interference \u2014 before routing/admission consume the curve.",
+  "smoke": false,
+  "rounds": 2,
+  "stages": {
+    "wave": {
+      "leg": "contention-wave",
+      "rounds": 2,
+      "smoke": false,
+      "gateway_at_start": {
+        "ready": true
+      },
+      "prefill_contention": [
+        {
+          "level": 1,
+          "round": 0,
+          "seed": 9007,
+          "wall_s": 94.1,
+          "exit": 0,
+          "ok": 1,
+          "total": 1,
+          "ttft_p50_s": 93.81,
+          "ttft_max_s": 93.81,
+          "prefill_ms_per_tok_mean": 11.276,
+          "aggregate_prefill_tok_s": 88.7
+        },
+        {
+          "level": 1,
+          "round": 1,
+          "seed": 9014,
+          "wall_s": 85.5,
+          "exit": 0,
+          "ok": 1,
+          "total": 1,
+          "ttft_p50_s": 85.33,
+          "ttft_max_s": 85.33,
+          "prefill_ms_per_tok_mean": 10.255,
+          "aggregate_prefill_tok_s": 97.5
+        },
+        {
+          "level": 2,
+          "round": 0,
+          "seed": 9021,
+          "wall_s": 134.7,
+          "exit": 0,
+          "ok": 2,
+          "total": 2,
+          "ttft_p50_s": 129.13,
+          "ttft_max_s": 134.5,
+          "prefill_ms_per_tok_mean": 15.843,
+          "aggregate_prefill_tok_s": 123.7
+        },
+        {
+          "level": 2,
+          "round": 1,
+          "seed": 9028,
+          "wall_s": 139.4,
+          "exit": 0,
+          "ok": 2,
+          "total": 2,
+          "ttft_p50_s": 96.87,
+          "ttft_max_s": 139.4,
+          "prefill_ms_per_tok_mean": 14.199,
+          "aggregate_prefill_tok_s": 119.4
+        },
+        {
+          "level": 4,
+          "round": 0,
+          "seed": 9035,
+          "wall_s": 261.4,
+          "exit": 0,
+          "ok": 4,
+          "total": 4,
+          "ttft_p50_s": 220.05,
+          "ttft_max_s": 261.34,
+          "prefill_ms_per_tok_mean": 21.834,
+          "aggregate_prefill_tok_s": 127.3
+        },
+        {
+          "level": 4,
+          "round": 1,
+          "seed": 9042,
+          "wall_s": 290.0,
+          "exit": 0,
+          "ok": 4,
+          "total": 4,
+          "ttft_p50_s": 249.27,
+          "ttft_max_s": 289.99,
+          "prefill_ms_per_tok_mean": 24.205,
+          "aggregate_prefill_tok_s": 114.8
+        },
+        {
+          "level": 8,
+          "round": 0,
+          "seed": 9049,
+          "wall_s": 736.9,
+          "exit": 0,
+          "ok": 8,
+          "total": 8,
+          "ttft_p50_s": 436.47,
+          "ttft_max_s": 736.9,
+          "prefill_ms_per_tok_mean": 49.29,
+          "aggregate_prefill_tok_s": 90.3
+        },
+        {
+          "level": 8,
+          "round": 1,
+          "seed": 9056,
+          "wall_s": 686.3,
+          "exit": 0,
+          "ok": 8,
+          "total": 8,
+          "ttft_p50_s": 511.97,
+          "ttft_max_s": 686.29,
+          "prefill_ms_per_tok_mean": 55.358,
+          "aggregate_prefill_tok_s": 97.0
+        }
+      ],
+      "calibration_after_prefill": [
+        {
+          "buckets": [
+            "1",
+            "2",
+            "3-4",
+            "5-8"
+          ],
+          "decode_ms_per_token": [
+            25.0,
+            25.0,
+            25.0,
+            25.0
+          ],
+          "decode_samples": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "loaded_from_store": false,
+          "machine": "apple-m5",
+          "marginal": {
+            "decode_aggregate_factor": [
+              1.0,
+              2.0,
+              3.0,
+              5.0
+            ],
+            "decode_gain_entering_bucket": [
+              1.0,
+              2.0,
+              1.5,
+              1.25
+            ],
+            "gate_would_admit": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              false
+            ],
+            "prefill_aggregate_factor": [
+              1.0,
+              1.542521482036254,
+              2.755002563092075,
+              3.941876099679473
+            ],
+            "prefill_gain_entering_bucket": [
+              1.0,
+              1.542521482036254,
+              1.7860383762404703,
+              1.0731050178920645
+            ]
+          },
+          "model": "Qwen3.5-9B-Q4_K_M.gguf",
+          "prefill": {
+            "contention_multiplier": [
+              1.0,
+              1.2965783772163983,
+              1.0889282065251338,
+              1.2684315472032637
+            ],
+            "contention_samples": [
+              0,
+              6,
+              8,
+              8
+            ],
+            "fixed_ms": 1.4551915228366852e-11,
+            "ms_per_token": 16.776325180345534,
+            "samples": 8
+          },
+          "runtime": "llama",
+          "server": "http://127.0.0.1:8085#Qwen3.5-9B-Q4_K_M.gguf",
+          "slot_count": 8,
+          "store_path": "/Users/eswr/code/ai-infrastructure/benchmarks/results/serving-interactions-4c-20260927-014857/calibration/apple-m5/qwen3.5-9b-q4_k_m.gguf/llama-8slots.json",
+          "updated_at_epoch_s": 1790456392
+        }
+      ],
+      "decode_scaling": [
+        {
+          "level": 1,
+          "round": 0,
+          "seed": 9063,
+          "exit": 0,
+          "decode_ms_per_tok_mean": 115.9,
+          "decode_ms_per_tok_p50": 115.9,
+          "max_stall_s": 1.89
+        },
+        {
+          "level": 1,
+          "round": 1,
+          "seed": 9070,
+          "exit": 0,
+          "decode_ms_per_tok_mean": 110.9,
+          "decode_ms_per_tok_p50": 110.9,
+          "max_stall_s": 1.55
+        },
+        {
+          "level": 2,
+          "round": 0,
+          "seed": 9077,
+          "exit": 0,
+          "decode_ms_per_tok_mean": 175.4,
+          "decode_ms_per_tok_p50": 175.1,
+          "max_stall_s": 2.15
+        },
+        {
+          "level": 2,
+          "round": 1,
+          "seed": 9084,
+          "exit": 0,
+          "decode_ms_per_tok_mean": 173.9,
+          "decode_ms_per_tok_p50": 173.9,
+          "max_stall_s": 1.86
+        },
+        {
+          "level": 4,
+          "round": 0,
+          "seed": 9091,
+          "exit": 0,
+          "decode_ms_per_tok_mean": 259.1,
+          "decode_ms_per_tok_p50": 259.1,
+          "max_stall_s": 1.97
+        },
+        {
+          "level": 4,
+          "round": 1,
+          "seed": 9098,
+          "exit": 0,
+          "decode_ms_per_tok_mean": 256.9,
+          "decode_ms_per_tok_p50": 256.9,
+          "max_stall_s": 2.28
+        },
+        {
+          "level": 8,
+          "round": 0,
+          "seed": 9105,
+          "exit": 0,
+          "decode_ms_per_tok_mean": 453.6,
+          "decode_ms_per_tok_p50": 454.5,
+          "max_stall_s": 2.55
+        },
+        {
+          "level": 8,
+          "round": 1,
+          "seed": 9112,
+          "exit": 0,
+          "decode_ms_per_tok_mean": 472.1,
+          "decode_ms_per_tok_p50": 518.2,
+          "max_stall_s": 3.11
+        }
+      ],
+      "calibration_after_decode": [
+        {
+          "buckets": [
+            "1",
+            "2",
+            "3-4",
+            "5-8"
+          ],
+          "decode_ms_per_token": [
+            220.00868987123448,
+            306.8474196524004,
+            396.8131948859861,
+            455.0528320117859
+          ],
+          "decode_samples": [
+            8,
+            6,
+            8,
+            8
+          ],
+          "loaded_from_store": false,
+          "machine": "apple-m5",
+          "marginal": {
+            "decode_aggregate_factor": [
+              1.0,
+              1.4339940685860249,
+              1.6633168405686325,
+              2.4173972162592348
+            ],
+            "decode_gain_entering_bucket": [
+              1.0,
+              1.4339940685860249,
+              1.1599189125020084,
+              1.0900195729243054
+            ],
+            "gate_would_admit": [
+              true,
+              false,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              false
+            ],
+            "prefill_aggregate_factor": [
+              1.0,
+              0.65132381281966,
+              0.7334466904885116,
+              1.100665226025969
+            ],
+            "prefill_gain_entering_bucket": [
+              1.0,
+              0.65132381281966,
+              1.1260860973489235,
+              1.1255063663449811
+            ]
+          },
+          "model": "Qwen3.5-9B-Q4_K_M.gguf",
+          "prefill": {
+            "contention_multiplier": [
+              1.0,
+              3.0706692441379606,
+              4.090276824348137,
+              4.542707338954334
+            ],
+            "contention_samples": [
+              0,
+              12,
+              16,
+              16
+            ],
+            "fixed_ms": 459.09308169357973,
+            "ms_per_token": 16.723218668141932,
+            "samples": 16
+          },
+          "runtime": "llama",
+          "server": "http://127.0.0.1:8085#Qwen3.5-9B-Q4_K_M.gguf",
+          "slot_count": 8,
+          "store_path": "/Users/eswr/code/ai-infrastructure/benchmarks/results/serving-interactions-4c-20260927-014857/calibration/apple-m5/qwen3.5-9b-q4_k_m.gguf/llama-8slots.json",
+          "updated_at_epoch_s": 1790457317
+        }
+      ],
+      "decode_interference": [
+        {
+          "level": 1,
+          "interactive_exit": 0,
+          "inject_exit": 0,
+          "inject_wall_s": 62.8,
+          "itl_p50_ms": 76.92666699999245,
+          "itl_p95_ms": 299.8807915000011,
+          "itl_p99_ms": 10803.192208299997,
+          "max_stall_s": 11.19,
+          "interactive_ttft_s": 4.54,
+          "injected_ttft_p50_s": 62.82
+        },
+        {
+          "level": 2,
+          "interactive_exit": 0,
+          "inject_exit": 0,
+          "inject_wall_s": 125.8,
+          "itl_p50_ms": 77.52458399999887,
+          "itl_p95_ms": 9390.95325,
+          "itl_p99_ms": 11912.141020199988,
+          "max_stall_s": 14.07,
+          "interactive_ttft_s": 4.51,
+          "injected_ttft_p50_s": 83.97
+        },
+        {
+          "level": 4,
+          "interactive_exit": 0,
+          "inject_exit": 0,
+          "inject_wall_s": 248.9,
+          "itl_p50_ms": 93.25587500003166,
+          "itl_p95_ms": 10353.475687000006,
+          "itl_p99_ms": 12651.901612200003,
+          "max_stall_s": 15.21,
+          "interactive_ttft_s": 27.9,
+          "injected_ttft_p50_s": 207.56
+        },
+        {
+          "level": 8,
+          "interactive_exit": 0,
+          "inject_exit": 0,
+          "inject_wall_s": 629.3,
+          "itl_p50_ms": 97.59108350001043,
+          "itl_p95_ms": 15142.887081249992,
+          "itl_p99_ms": 16148.556907330028,
+          "max_stall_s": 16.3,
+          "interactive_ttft_s": 41.6,
+          "injected_ttft_p50_s": 426.79
+        }
+      ],
+      "wall_s": 4498.8,
+      "calibration_after": [
+        {
+          "buckets": [
+            "1",
+            "2",
+            "3-4",
+            "5-8"
+          ],
+          "decode_ms_per_token": [
+            615.9149336178775,
+            730.1355647393003,
+            396.8131948859861,
+            455.0528320117859
+          ],
+          "decode_samples": [
+            11,
+            7,
+            8,
+            8
+          ],
+          "loaded_from_store": false,
+          "machine": "apple-m5",
+          "marginal": {
+            "decode_aggregate_factor": [
+              1.0,
+              1.6871248665658245,
+              4.656460079117414,
+              6.7675101690381885
+            ],
+            "decode_gain_entering_bucket": [
+              1.0,
+              1.6871248665658245,
+              2.759997301560571,
+              1.0900195729243056
+            ],
+            "gate_would_admit": [
+              true,
+              false,
+              true,
+              true,
+              false,
+              true,
+              true,
+              true,
+              false
+            ],
+            "prefill_aggregate_factor": [
+              1.0,
+              0.9707877100552037,
+              1.3205186488222025,
+              1.3054216077163183
+            ],
+            "prefill_gain_entering_bucket": [
+              1.0,
+              0.9707877100552037,
+              1.3602548066323494,
+              0.7414255047897186
+            ]
+          },
+          "model": "Qwen3.5-9B-Q4_K_M.gguf",
+          "prefill": {
+            "contention_multiplier": [
+              1.0,
+              2.060182652998636,
+              2.2718346330631234,
+              3.830180204192355
+            ],
+            "contention_samples": [
+              0,
+              15,
+              20,
+              22
+            ],
+            "fixed_ms": 657.7675638163637,
+            "ms_per_token": 12.300898561523919,
+            "samples": 22
+          },
+          "runtime": "llama",
+          "server": "http://127.0.0.1:8085#Qwen3.5-9B-Q4_K_M.gguf",
+          "slot_count": 8,
+          "store_path": "/Users/eswr/code/ai-infrastructure/benchmarks/results/serving-interactions-4c-20260927-014857/calibration/apple-m5/qwen3.5-9b-q4_k_m.gguf/llama-8slots.json",
+          "updated_at_epoch_s": 1790458462
+        }
+      ],
+      "aggregate_prefill_tok_s_by_level": {
+        "1": 93.1,
+        "2": 121.6,
+        "4": 121.0,
+        "8": 93.7
+      },
+      "prefill_saturation_level": 4,
+      "verdict": "healthy"
+    }
+  },
+  "memory_peak_rss_mb": 9848.4,
+  "memory_peak_footprint_mb": 14848.0
+}
