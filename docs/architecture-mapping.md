@@ -369,7 +369,111 @@ analogue at this layer because PagedAttention + chunked prefill dissolve
 the prefill/decode interference we measured on Metal — that difference is
 exactly why our interactive SLO needs chunked prefill on real GPUs.
 
-## Trace 4 — a GPU node through the GPU Operator
+### Session record 4 — GPU Operator, node-as-state-machine (read 2026-09-28, sparse checkout at HEAD)
+
+Files actually read: `controllers/state_manager.go` (1062 lines: node
+labels, operand registration, SyncState aggregation),
+`controllers/clusterpolicy_controller.go` (Reconcile, `updateCRState`),
+`internal/state/manager.go`, `internal/state/state.go` (`SyncState`:
+ready/notReady/ignore/reset/error), `internal/state/results.go`
+(one NotReady ⇒ aggregate NotReady), `internal/state/dcgm_exporter.go`,
+`driver.go` (shared `configurableState` skeleton), plus greps for
+unschedulable/taint/condition across controllers/ and internal/.
+
+**The verified path from "GPU node exists" to "GPU consumable":**
+
+1. A node appears with an NVIDIA GPU; the operator's node-labeling marks
+   eligibility with its OWN label vocabulary
+   (`nvidia.com/gpu.present`, `nvidia.com/gpu.deploy.<operand>=true`,
+   `nvidia.com/mig.capable` — state_manager.go:41-82). These are
+   *scheduling-for-operands* labels: which DaemonSets should run here.
+2. `clusterpolicy_controller.Reconcile` → `state_manager.SyncState` runs
+   one `State` per operand (driver, container-toolkit, device-plugin,
+   DCGM host monitoring, dcgm-exporter, GFD — mostly a shared
+   `configurableState` skeleton rendering per-node DaemonSets). Each
+   returns `SyncState`; `Results` aggregates (results.go: one NotReady ⇒
+   whole-NodePolicy NotReady). ClusterPolicy `status.state` carries the
+   aggregate.
+3. **`nvidia.com/gpu` becomes a schedulable resource NOT via the
+   operator**: the device-plugin DaemonSet registers with the KUBELET,
+   and the kubelet's device manager advertises the extended resource.
+   The operator only ensures the plugin runs.
+4. Capability labels (`nvidia.com/gpu.product`, counts, driver version)
+   are written by GPU-Feature-Discovery — a separate operand DaemonSet —
+   again not the operator's controllers.
+
+**The seven questions:**
+
+1. *Node preparation vs device advertisement* — split three ways: the
+   operator prepares the node (drivers/toolkit DaemonSets + operand
+   labels); the DEVICE PLUGIN advertises devices (via kubelet
+   registration → extended resources); GFD advertises *descriptive*
+   labels. Preparation, advertisement, and description are three owners.
+2. *Which operands a node needs* — decided by node labels + ClusterPolicy
+   spec, encoded back as `nvidia.com/gpu.deploy.*` labels, then each
+   state's control functions render/patch the operand DaemonSet with node
+   affinity onto exactly those labels. Desired state ping-pongs through
+   the Kubernetes API, never through an internal list.
+3. *Where `nvidia.com/gpu` becomes schedulable* — in the KUBELET, via
+   device-plugin registration. The operator's job ends at "the plugin is
+   running and healthy on this node."
+4. *State in Kubernetes objects vs internal enums* — almost everything is
+   K8s-shaped: operand DaemonSets (existence = deployment intent),
+   node labels (eligibility + capability), ClusterPolicy
+   `status.state` (aggregate ready/notReady). The ONLY internal enum is
+   the per-operand `SyncState` — and it is short-lived reconciliation
+   bookkeeping, not a lifecycle vocabulary.
+5. *Unhealthy GPUs — who reacts* — **the operator does NOT decide
+   "GPU unhealthy → stop scheduling."** No unschedulable/taint/condition
+   logic exists in its controllers (verified by grep; the only
+   NoSchedule reference is a comment). The chain is: device plugin
+   unhealthy ⇒ KUBELET withdraws/marks the `nvidia.com/gpu` resources ⇒
+   the scheduler stops placing GPU pods there. DCGM exporter = pure
+   observability; *consumers* (or a human) turn XID/thermal signals into
+   taints/cordons. This is the split the session was designed to find:
+   **inference-lab's fleet controller combines responsibilities that the
+   production stack deliberately separates** — telemetry (exporter),
+   advertisement (device plugin + kubelet), and enforcement (scheduler).
+6. *Continuous reconcile vs configure-once* — everything operand-shaped
+   is continuously reconciled (DaemonSets re-rendered on node/CR churn;
+   per-node state re-synced); nothing is "configured once" — even node
+   labels are re-derived. This is reconciliation-over-declaration vs our
+   imperative sync loop; same destination, different control philosophy.
+7. *Where DCGM fits* — two separate operands: `dcgm` (host monitoring
+   DaemonSet, DCGM REST API for the exporter/operator diagnostics) and
+   `dcgm-exporter` (Prometheus surface). Pure observability both: the
+   operator deploys them, consumes nothing from them for scheduling
+   decisions.
+
+**Matched / diverged / justified updates:**
+
+* Matched: node eligibility influences placement (their deploy-labels +
+  GFD capability labels ↔ our capability labels + placement gates);
+  health/state must affect schedulability; observability and lifecycle
+  are separate concerns (their dcgm-exporter deploys but decides nothing
+  ↔ our exporter observes while fleet.rs decides).
+* Diverged: ONE explicit node state machine (ours) vs state distributed
+  across Kubernetes objects, DaemonSets, labels and continuous
+  reconciliation (theirs). Our NodeLifecycle declares transitions; the
+  operator never declares — it converges desired state and lets K8s
+  objects BE the state.
+* Justified simplification: the explicit machine makes failure exercises
+  deterministic and legible locally (fleet-check's XID → FAILED →
+  replace → validate is one line to read); in the operator's world the
+  same behavior emerges from reconciliation of half a dozen objects and
+  is only legible through their logs.
+
+**Adoption candidate (exactly one): a Kubernetes-shaped condition/label
+contract on our node statuses** — not another controller. inference-lab's
+node states are an internal enum visible only through /status; giving
+each simulated node a `conditions` array (`{type, status, reason,
+message}`, K8s condition semantics) — Ready/Draining/Failed with reasons
+— makes the fleet legible to any Kubernetes-shaped consumer (dashboards,
+alerting, a future real operator) without changing the state machine.
+**Rejected**: moving state into actual Kubernetes labels/taints (needs a
+controller watching our synthetic nodes — a controller to run a
+controller) and adding device-plugin-style advertisement modeling
+(duplicates what K8s already does in production).
 
 ```text
 ClusterPolicy applied → clusterpolicy_controller → state manager

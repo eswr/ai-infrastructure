@@ -1014,12 +1014,26 @@ async fn status(State(st): State<Arc<AppState>>) -> Response {
             .snapshot()
             .into_iter()
             .map(|(id, state, total)| {
+                // Phase-7 adoption (GPU Operator session): expose node
+                // lifecycle as Kubernetes-shaped conditions — any
+                // K8s-shaped consumer (dashboards, alerting, a future
+                // real operator) can read them without knowing our enum.
+                let ready = matches!(
+                    state,
+                    inference_lab_worker_lifecycle::NodeState::Ready
+                        | inference_lab_worker_lifecycle::NodeState::Cordoned
+                        | inference_lab_worker_lifecycle::NodeState::Draining
+                );
                 serde_json::json!({
                     "id": id,
                     "state": state.as_str(),
                     "allows_new_placements": state.allows_new_placements(),
                     "serves_traffic": state.serves_traffic(),
                     "transitions_total": total,
+                    "conditions": [
+                        {"type": "Ready", "status": if ready {"True"} else {"False"}, "reason": state.as_str()},
+                        {"type": "PlacementOpen", "status": if state.allows_new_placements() {"True"} else {"False"}, "reason": state.as_str()},
+                    ],
                 })
             })
             .collect::<Vec<_>>(),
