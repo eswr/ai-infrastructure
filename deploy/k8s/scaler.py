@@ -64,6 +64,11 @@ def current_replicas() -> int:
     return int(doc.get("spec", {}).get("replicas", 0))
 
 
+def ready_replicas() -> int:
+    doc = k8s_api("GET", f"/apis/apps/v1/namespaces/{NAMESPACE}/deployments/{DEPLOYMENT}")
+    return int(doc.get("status", {}).get("readyReplicas", 0))
+
+
 def set_replicas(n: int) -> None:
     k8s_api(
         "PATCH",
@@ -144,6 +149,14 @@ def main() -> None:
         if last_slo is not None and now > (last_slo_t or now):
             slo_rate = max(0.0, (slo - last_slo) / (now - last_slo_t))
         last_slo, last_slo_t = slo, now
+
+        # Phase-7 adoption (Dynamo planner): while a previous adjustment is
+        # still starting (ready < desired), OBSERVE ONLY — stacking
+        # scale-ups before the last ones register thrashes the pool, and
+        # scale-downs would race a startup.
+        if ready < desired:
+            log(f"scaling in progress (ready={ready} < desired={desired}); observing only")
+            continue
 
         reason = None
         if est_q > SCALE_UP_QUEUE_S:

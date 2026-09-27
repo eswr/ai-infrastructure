@@ -126,7 +126,108 @@ converting policies to runtime plugins (framework rewrite, no story gain)
 and a latency-predictor data producer (duplicates our calibrated cost
 model at 10× scope).
 
-## Trace 2 — one request through NVIDIA Dynamo
+### Session record 2 — NVIDIA Dynamo, control-plane decomposition (read 2026-09-28, repos at HEAD)
+
+Files actually read: `components/src/dynamo/frontend/main.py`,
+`components/src/dynamo/planner/__main__.py`, `planner/core/load_scaling.py`
+(1129 lines: `LoadScalingMixin`, `_advance_load_{single,disagg,agg}`,
+prefill/decode decisions, scaling budgets),
+`planner/core/state_machine.py` (`PlannerScalingState`: `begin_tick`,
+`observe_worker_counts`, `observe_fpm`, `advance_load`),
+`planner/core/types.py`, `planner/connectors/` (observe side: kubernetes,
+mdc, global_planner, virtual), `planner/environment/runtime.py` (actuate
+side: kubernetes client), `lib/runtime/src/discovery/` (etcd leases, kube,
+mock stores), plus the previously-read `lib/llm/src/kv_router.rs`.
+
+**The boundary, precisely.** Dynamo separates THREE control concerns that
+inference-lab fuses into one gateway process:
+
+1. *Request routing* — data plane, per request, milliseconds:
+   frontend (HTTP) → Rust KV router → worker. State: the KV block index
+   (worker-reported, event-fed) + scoring gauges. Never scales anything.
+2. *Planning* — control plane, per tick, fleet-wide: a SEPARATE component
+   (`planner/`) that observes (connectors: metrics/kubernetes), decides
+   (core/state_machine + load_scaling: per-component prefill/decode
+   decisions, scaling budgets, `_pending_startup` accounting, SLA vs
+   "easy" modes, throughput lower bounds), and actuates
+   (`environment/runtime.py` → Kubernetes deployments/scale).
+3. *Liveness* — etcd LEASES in `lib/runtime/src/discovery/`: workers
+   register with a lease; expiry is automatic. There is no DRAINING/
+   MAINTENANCE vocabulary here — liveness is delegated to leases +
+   Kubernetes; node maintenance is someone else's problem entirely.
+
+**The six questions:**
+
+1. *Routing vs planning boundary* — exactly where our scaler.py sits
+   relative to our gateway: the router never scales, the planner never
+   picks workers. Dynamo draws the line as a PROCESS boundary; we draw it
+   as a process boundary too (scaler.py), but our gateway also folds in
+   the lifecycle-response (fleet controller) that Dynamo leaves to leases
+   + K8s.
+2. *Router state vs planner state* — fully disjoint. Router: KV block
+   index + load gauges, per-request-relevant. Planner: worker counts,
+   scaling budgets, pending-startup, perf regressions, decision reasons
+   (`_diag_load_reason`). Our equivalent: router holds cache/load state ✓,
+   scaler holds its own desired/adopted replicas ✓ — but our fleet
+   controller's node gates are read BY the router while being WRITTEN by
+   the controller, a shared-state seam Dynamo avoids by not having node
+   lifecycle in the request path at all.
+3. *Worker capacity & model residency* — residency belongs to the ROUTER
+   (KV block index); capacity belongs to the PLANNER (perf model fed by
+   `connectors/` runtime config: `max_num_batched_tokens`, `max_kv_tokens`,
+   `context_length` — see `connectors/global_planner.py`). inference-lab
+   puts both in `PlacementGate`: vram_gb + residency in one check. Same
+   inputs, different ownership.
+4. *Event-driven vs reconciled* — request routing and worker liveness are
+   event-driven (KV events, etcd leases); planning is tick-reconciled
+   (`begin_tick` → observe → decide → actuate) with a state machine that
+   explicitly BLOCKS new scale-ups while a previous adjustment is still
+   starting ("scaling_in_progress, observing only",
+   load_scaling.py:63-65) and caps scale-downs with throughput bounds.
+5. *Local vs cluster-wide* — router decisions are local to a frontend
+   instance (index + gauges; cross-instance sync only for KV events);
+   planner decisions are cluster-wide by construction (Prometheus fleet
+   view, K8s actuation). Nothing in the request path needs the cluster
+   view.
+6. *Mapping our three pieces* — `PlacementGate` ≈ router-side filter
+   (plus capacity feasibility that Dynamo gets from K8s scheduling for
+   free); `NodeLifecycle` has NO Dynamo analogue (delegated to leases +
+   K8s + the operator layer — the operator session will cover it); our
+   `scaler.py` ≈ the planner, but with ~5% of its machinery (no state
+   machine, no budgets, no startup accounting).
+
+**Is inference-lab too centralized?** Partly, and the interesting part is
+precise: the routing/planning split EXISTS in inference-lab (gateway vs
+scaler.py are separate processes, like frontend+router vs planner). What
+we centralize that Dynamo does not is *node/worker lifecycle inside the
+request-path owner* — our gateway watches pods, writes placement gates,
+drains workers, and answers readiness. Dynamo delegates all of it. At
+laptop scale the centralization is justified (one process, one state
+truth, no leases to expire wrongly); the seam to preserve is that the
+router only ever READS the planner/controller's published gates.
+
+**Matched / diverged / justified updates:**
+
+* Matched: placement before dispatch; explicit worker/resource state;
+  runtime health feeding routing (their FPM observations and worker
+  counts ↔ our gauge sampler); queue/load as the scaling signal.
+* Diverged: lifecycle-in-request-path (ours) vs lifecycle-by-delegation
+  (theirs: etcd leases for liveness, K8s for scale, operator for nodes).
+* Justified simplification: single-process fleet controller — the drift-
+  adoption + counters give observability without a second control loop.
+
+**Adoption candidate (exactly one): the planner's scaling-in-progress
+guard + startup accounting.** Our scaler counts `replicas` it asked for,
+not replicas that are READY — under sustained pressure it can stack
+scale-ups while previous pods are still starting, and scale-down decisions
+can race a startup. Adopt `desired_pending` accounting: while
+`ready_replicas < desired`, observe only (log the hold) — mirroring
+`_load_scaling_blocked`/`_pending_startup`. Accepted: ~15 lines in
+scaler.py, prevents scale-up thrash, no new subsystem. **Rejected**:
+etcd-lease liveness (k8s pod presence already is the lease in our world)
+and splitting the fleet controller out of the gateway (two processes for
+one laptop's control plane is the complexity Dynamo earns with real
+fleets).
 
 ```text
 client → frontend (FastAPI) → preprocessor → KV router (Rust)
