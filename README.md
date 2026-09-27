@@ -149,7 +149,13 @@ docs/          architecture · benchmark-methodology · failure-testing ·
       (simulation="true"), node lifecycle (provision/ready/cordon/drain/
       maintenance/failed/recovering), failure exercises (XID, thermal, OOM)
       — `make fleet-check`; Slurm batch-side lab with FAKE GRES GPUs
-      (`make slurm-up` / `slurm-demo`)
+      (`make slurm-up` / `slurm-demo`) — tag `phase-6-datacenter-control-plane`
+- [ ] Phase 7 — architecture/source study against production systems
+      (llm-d, NVIDIA Dynamo, vLLM, GPU Operator, dcgm-exporter, Slurm):
+      one execution-path trace each, mapped back to inference-lab in
+      [docs/architecture-mapping.md](docs/architecture-mapping.md), plan
+      and verified repo paths in
+      [docs/phase7-reading-plan.md](docs/phase7-reading-plan.md)
 
 ## Scope: measured vs simulated
 
