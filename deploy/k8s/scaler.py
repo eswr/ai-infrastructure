@@ -119,6 +119,7 @@ def main() -> None:
         try:
             metrics = gateway_metrics()
             replicas = current_replicas()
+            ready = ready_replicas()
         except Exception as e:  # gateway/API hiccup: hold state
             log(f"probe failed ({e}); holding")
             continue
