@@ -249,7 +249,103 @@ planner is our queue-signal scaler with a performance model
 (`perf_model/`) — the same "learn the service curve, scale on the queue"
 idea we do with the calibrated cost model + `estimated_queue_seconds`.
 
-## Trace 3 — one request through vLLM
+### Session record 3 — vLLM v1 in-worker scheduler (read 2026-09-28, sparse checkout at HEAD)
+
+Files actually read: `vllm/v1/core/sched/scheduler.py` (schedule() loop,
+allocation-failure preemption, `_preempt_request`, waiting promotion),
+`vllm/config/scheduler.py`, structure of `vllm/v1/core/kv_cache_manager.py`
+(956 lines) and `block_pool.py` (903 lines).
+
+**The verified step-by-step.** Each `schedule()` iteration (scheduler.py:557):
+a per-iteration **token budget** (`max_num_scheduled_tokens` /
+`max_num_batched_tokens`); RUNNING requests are served first, each getting
+`num_new_tokens` capped by budget, `long_prefill_token_threshold` (chunked
+prefill), and encoder budgets; then WAITING requests are promoted while
+budget and `max_num_active_reqs` allow. For every request,
+`kv_cache_manager.allocate_slots(...)` reserves KV blocks **before** the
+step is scheduled; on failure the scheduler preempts the lowest-priority
+running request and retries. The step's output is a `SchedulerOutput` the
+model runner executes in one batched forward pass.
+
+**The seven questions:**
+
+1. *Which sequences enter the next iteration* — running first (index
+   order), each clipped to the remaining token budget; then waiting
+   promotions; `num_new_tokens == 0` → `continue` (scheduler.py:724),
+   deliberately breaking FCFS so one unrunnable head cannot idle the batch.
+2. *Prefill vs decode* — the comment at scheduler.py:560 is the answer:
+   "There's no decoding phase nor prefill phase in the scheduler. Each
+   request just has `num_computed_tokens` and `num_tokens_with_spec`."
+   A "prefill" is simply a request still catching up. inference-lab's
+   `active_prefills`/`active_decodes` split is a dispatch-time *estimate*
+   of the same distinction; vLLM's version is per-token bookkeeping, not a
+   phase label.
+3. *Continuous batching in code* — the iteration repeats on a fixed token
+   budget and re-forms the batch every step: a running request continues
+   with whatever budget remains, a waiting request can join mid-stream,
+   and a chunked prefill resumes where it stopped. There is no batch
+   boundary to wait for. That is the whole trick.
+4. *KV block pressure changes scheduling* — through `allocate_slots`
+   returning None and through the chunk caps: KV pressure converts
+   directly into smaller `num_new_tokens` (chunking), skipped promotions,
+   and preemption.
+5. *When a request cannot get enough KV blocks* — the retry loop
+   (scheduler.py:750-800) preempts the lowest-priority running request
+   (`_preempt_request`: free blocks, `num_computed_tokens = 0`, status
+   PREEMPTED, back to waiting) and retries allocation; if the request
+   itself is the victim it waits. v1 preemption is **recompute**, not
+   swap — prefix caching softens the re-prefill.
+6. *Long prefills chunked or preempted — the Phase 4C answer* — YES, and
+   explicitly for our failure mode: `long_prefill_token_threshold` "exists
+   to stop a long prefill from starving other requests of the token
+   budget" (scheduler.py:577-585), with an adaptive variant flooring the
+   cap at `max_num_batched_tokens / num_eligible_reqs`. An 8K prefill that
+   held the Metal runtime for 40-90 s (our ITL p95 0.3→15.1 s stall) would
+   have been sliced into budget-sized chunks with interactive decodes
+   interleaved between chunks. llama.cpp and mlx-lm expose no equivalent
+   control surface — which is exactly why the gateway needed a contention
+   gate instead.
+7. *Authoritative state the gateway only estimates* — per-request
+   `num_computed_tokens`/`num_tokens_with_spec`, live block tables,
+   queue depths, preemption counts, cache hit/eviction events. Everything
+   our admission budget, ECT terms, and contention gate *predict* is, one
+   layer down, *measured* here every step.
+
+**Matched / diverged / justified updates:**
+
+* Matched: explicit prefill/decode distinction (we model it; they
+  dissolve it into per-token catch-up — the distinction survives as
+  bookkeeping); KV pressure treated as scheduling state; fairness vs
+  throughput as an explicit scheduler concern (their budget/floor knobs ↔
+  our contention gate + service classes).
+* Diverged: the dispatch boundary. inference-lab estimates accelerator
+  contention BEFORE dispatch; vLLM schedules with authoritative per-step
+  state AFTER dispatch. Our prefill/decode classification is an estimate
+  from a calibration model — vLLM's is per-token truth.
+* Justified simplification: the gateway-level contention model was
+  necessary because llama.cpp/MLX did not expose a rich internal
+  scheduler control surface — vLLM's `long_prefill_token_threshold` is
+  the parameterization of the problem we solved one layer up, under a
+  runtime that offered no knob at all.
+
+**Adoption candidate (exactly one): a runtime scheduler-state interface
+contract — telemetry, not scheduling logic.** A production runtime should
+expose, per worker: `running` and `waiting` request counts, KV utilization
+(fraction of blocks in use), preemption count, and a prefill-chunk
+indicator — machine-readable at `/scheduler_state` (or the equivalent
+Prometheus series: vLLM already exports `num_requests_running`,
+`num_requests_waiting`, `gpu_cache_usage_perc`, `num_preemptions`). The
+gateway's cost model would then consume *runtime-reported* queue state as
+a calibration target instead of predicting it from seeds. Implemented
+here as the contract's reference half: the mock worker now serves
+`GET /scheduler_state` (running/waiting/kv — honest about what a mock
+cannot know); the gateway consumption side is deliberately deferred —
+wiring per-step runtime truth into ECT duplicates the runtime's own
+scheduler, and the contract's value is that it documents exactly what a
+real vLLM deployment hands the control plane for free. **Rejected**:
+adopting any vLLM scheduling algorithm locally (token-budget iteration,
+preemption) — our runtimes give no control surface to drive, and
+re-implementing a scheduler that never executes is scope theater.
 
 ```text
 OpenAI api_server → AsyncLLM → EngineCore → scheduler.schedule()

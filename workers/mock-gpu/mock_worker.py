@@ -304,6 +304,25 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path == "/scheduler_state":
+            # Phase-7 adoption: the runtime scheduler-state interface
+            # contract (see docs/architecture-mapping.md, vLLM session).
+            # A production runtime (vLLM) reports num_requests_running,
+            # num_requests_waiting, KV utilization and preemption counts
+            # here — the ground truth a control plane can only estimate.
+            # The mock is honest about what it cannot know: its queue is
+            # unbounded (no waiting state) and it has no KV cache.
+            with _LOCK:
+                s = dict(_STATS)
+            self._json(200, {
+                "running": s["active"],
+                "waiting": 0,
+                "queue_mode": "unbounded",
+                "kv_cache_usage": None,
+                "num_preemptions": 0,
+                "requests_total": s["requests"],
+                "model": MODEL_NAME,
+            })
         elif self.path == "/admin/state":
             with _LOCK:
                 s = dict(_STATS)
