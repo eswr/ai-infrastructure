@@ -1,0 +1,95 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["inference-lab", "simulation"],
+  "templating": { "list": [] },
+  "time": { "from": "now-30m", "to": "now" },
+  "title": "GPU Fleet — Simulation (mock DCGM)",
+  "uid": "gpu-fleet-sim",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Framebuffer used (MiB) — simulation=\"true\"",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "DCGM_FI_DEV_FB_USED", "legendFormat": "{{UUID}} ({{modelName}})" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "mebibytes" }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "title": "GPU temperature (°C) — thermal exercises land here",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "DCGM_FI_DEV_GPU_TEMP", "legendFormat": "{{UUID}} ({{modelName}})" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "celsius", "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null },
+          { "color": "orange", "value": 80 },
+          { "color": "red", "value": 87 }
+        ] } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "GPU utilization (%)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "DCGM_FI_DEV_GPU_UTIL", "legendFormat": "{{UUID}} ({{modelName}})" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "max": 100 }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "title": "Power draw (W)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "DCGM_FI_DEV_POWER_USAGE", "legendFormat": "{{UUID}} ({{modelName}})" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "watt" }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "title": "Last XID error code (0 = healthy) — critical faults fail the node",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "DCGM_FI_DEV_XID_ERRORS", "legendFormat": "{{UUID}} ({{modelName}})" }
+      ],
+      "fieldConfig": {
+        "defaults": { "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null },
+          { "color": "red", "value": 1 }
+        ] } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "title": "Node lifecycle states (gateway fleet controller)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 22 },
+      "targets": [
+        { "expr": "fleet_node_state", "legendFormat": "{{node}} {{state}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 12 } }, "overrides": [] }
+    }
+  ],
+  "schemaVersion": 39,
+  "version": 1
+}

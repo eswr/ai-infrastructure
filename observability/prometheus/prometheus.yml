@@ -13,6 +13,12 @@ scrape_configs:
     static_configs:
       - targets: ["host.docker.internal:8080"]
 
+  # Phase 6B: mock DCGM exporter for the SIMULATED GPU fleet (k3d nodePort
+  # 30081 -> host 9400). Every series carries simulation="true".
+  - job_name: dcgm-sim
+    static_configs:
+      - targets: ["host.docker.internal:9400"]
+
   # llama.cpp worker (native, exposes Prometheus metrics at /metrics).
   - job_name: llama-server
     static_configs:

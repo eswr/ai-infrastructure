@@ -95,6 +95,7 @@ impl Scenario {
     pub fn request(&self, idx: usize) -> ChatCompletionRequest {
         let messages = build_messages(self, idx);
         ChatCompletionRequest {
+            placement: None,
             model: self.model.clone(),
             messages,
             stream: self.stream,

@@ -695,6 +695,7 @@ name = "inference-lab-scheduler"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "inference-lab-protocol",
  "inference-lab-worker-lifecycle",
  "serde",
  "serde_json",
