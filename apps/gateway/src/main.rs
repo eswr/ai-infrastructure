@@ -223,6 +223,12 @@ fn record_decision(
         attrs.push(KeyValue::new("scheduler.decode_marginal_gain", v.decode_marginal_gain));
     }
     if let Some(b) = &d.bypass {
+        if b.reason == "exploration" {
+            st.metrics
+                .scheduler_affinity_exploration_total
+                .with_label_values(&["dispatched"])
+                .inc();
+        }
         attrs.push(KeyValue::new("scheduler.bypass_reason", b.reason));
         attrs.push(KeyValue::new("scheduler.bypassed_worker", b.worker_id.clone()));
         attrs.push(KeyValue::new("scheduler.bypassed_savings_ms", b.forgone_savings_ms));
@@ -819,6 +825,10 @@ async fn chat_completions(
         stream_mode,
         work_estimate: work_start,
         est_total_ms: est_total,
+        explored_affinity: decision
+            .bypass
+            .as_ref()
+            .is_some_and(|b| b.reason == "exploration"),
         service_class,
         interactive_slo: st.interactive_slo,
     };
@@ -1518,6 +1528,11 @@ async fn main() -> anyhow::Result<()> {
         // region hold until the machine can use them (phase 4C).
         contention_gate: std::env::var("ADMIT_MARGINAL_COST").ok().as_deref() == Some("1"),
         gate_max_hold_s: env_f64("CONTENTION_GATE_MAX_HOLD_S", 20.0),
+        // Phase-7 adoption (llm-d affinity exploration): probability of
+        // pricing a dispatch against inferred cache residency so real
+        // reuse telemetry can confirm or contradict the model.
+        prefix_exploration_probability: env_f64("SCHEDULER_PREFIX_EXPLORATION_PCT", 0.0)
+            .clamp(0.0, 1.0),
     };
     let router = Arc::new(if discovery_enabled {
         let r = WorkerRouter::dynamic(policy, router_config);

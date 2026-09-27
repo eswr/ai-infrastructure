@@ -237,6 +237,12 @@ pub struct Metrics {
     pub fleet_node_state: IntGaugeVec,
     /// Every node lifecycle edge (phase 6D/6E audit trail).
     pub fleet_node_transitions_total: IntCounterVec,
+    /// Phase-7 adoption (llm-d exploration): affinity decisions dispatched
+    /// against the inferred residency model, with the outcome once real
+    /// reuse telemetry landed — confirmed (0 reuse: the model was right to
+    /// be distrusted... i.e. absence confirmed), contradicted (reuse found
+    /// where the model priced none), or unobserved (no telemetry).
+    pub scheduler_affinity_exploration_total: IntCounterVec,
 }
 
 impl Metrics {
@@ -581,8 +587,19 @@ impl Metrics {
             "prefill_pressure",
             "worker_degraded",
             "insufficient_benefit",
+            "exploration",
         ] {
             scheduler_cache_affinity_bypassed_total.with_label_values(&[reason]);
+        }
+        let scheduler_affinity_exploration_total = IntCounterVec::new(
+            Opts::new(
+                "scheduler_affinity_exploration_total",
+                "Exploration dispatches against inferred cache residency, by outcome",
+            ),
+            &["outcome"],
+        )?;
+        for outcome in ["dispatched", "confirmed", "contradicted", "unobserved"] {
+            scheduler_affinity_exploration_total.with_label_values(&[outcome]);
         }
         let scheduler_contention_gate_holds_total = prometheus::Counter::new(
             "scheduler_contention_gate_holds_total",
@@ -805,6 +822,7 @@ impl Metrics {
         reg!(registry, placement_rejections_total);
         reg!(registry, fleet_node_state);
         reg!(registry, fleet_node_transitions_total);
+        reg!(registry, scheduler_affinity_exploration_total);
 
         Ok(Self {
             registry,
@@ -884,6 +902,7 @@ impl Metrics {
             placement_rejections_total,
             fleet_node_state,
             fleet_node_transitions_total,
+            scheduler_affinity_exploration_total,
         })
     }
 

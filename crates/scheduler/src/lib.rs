@@ -495,11 +495,22 @@ pub struct RouterConfig {
     /// How long a held request may wait before it dispatches anyway
     /// (spills through the anti-scaling region).
     pub gate_max_hold_s: f64,
+    /// Phase-7 adoption candidate (from llm-d's affinity-filter
+    /// exploration): with this probability, a priced cache affinity is
+    /// IGNORED for one dispatch — the residency model is inferred, not
+    /// authoritative, so occasionally routing against it lets real
+    /// telemetry confirm or contradict the model. 0.0 = off.
+    pub prefix_exploration_probability: f64,
 }
 
 impl Default for RouterConfig {
     fn default() -> Self {
-        Self { min_cache_savings_ms: 0.0, contention_gate: false, gate_max_hold_s: 20.0 }
+        Self {
+            min_cache_savings_ms: 0.0,
+            contention_gate: false,
+            gate_max_hold_s: 20.0,
+            prefix_exploration_probability: 0.0,
+        }
     }
 }
 
@@ -1013,6 +1024,8 @@ pub struct Router {
     /// two requests to the same "least loaded" slot before either
     /// registers its work.
     select_lock: Mutex<()>,
+    /// xorshift state for exploration rolls (no rand dependency).
+    exploration_seed: AtomicU64,
 }
 
 impl Router {
@@ -1028,14 +1041,26 @@ impl Router {
         if workers.is_empty() {
             anyhow::bail!("router needs at least one worker");
         }
-        Ok(Self { workers: RwLock::new(workers), policy, config, select_lock: Mutex::new(()) })
+        Ok(Self {
+            workers: RwLock::new(workers),
+            policy,
+            config,
+            select_lock: Mutex::new(()),
+            exploration_seed: AtomicU64::new(0x9E3779B97F4A7C15),
+        })
     }
 
     /// Empty registry for dynamic discovery (the k3d phase): workers join
     /// and leave at runtime as the watcher syncs Kubernetes state. Traffic
     /// before the first sync gets `AllUnhealthy`, which is honest.
     pub fn dynamic(policy: RoutingPolicy, config: RouterConfig) -> Self {
-        Self { workers: RwLock::new(Vec::new()), policy, config, select_lock: Mutex::new(()) }
+        Self {
+            workers: RwLock::new(Vec::new()),
+            policy,
+            config,
+            select_lock: Mutex::new(()),
+            exploration_seed: AtomicU64::new(0x9E3779B97F4A7C15),
+        }
     }
 
     /// Snapshot of the registry. The returned `Vec` owns its `Arc`s, so
@@ -1165,6 +1190,26 @@ impl Router {
         Some(self.workers.read().unwrap_or_else(|e| e.into_inner()).first()?.calibration().contention_notify())
     }
 
+    /// Phase-7 adoption (llm-d affinity filter): probabilistically distrust
+    /// the inferred residency model so real telemetry can confirm or
+    /// contradict it. xorshift roll — deterministic given the seed, no rand
+    /// dependency.
+    fn exploration_roll(&self) -> bool {
+        let p = self.config.prefix_exploration_probability;
+        if p <= 0.0 {
+            return false;
+        }
+        if p >= 1.0 {
+            return true;
+        }
+        let mut x = self.exploration_seed.load(Ordering::Relaxed);
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.exploration_seed.store(x, Ordering::Relaxed);
+        ((x >> 11) as f64) / ((1u64 << 53) as f64) < p
+    }
+
     /// The hold cap for one gate hold (`None` = gate off).
     pub fn contention_gate_hold(&self) -> Option<std::time::Duration> {
         self.config
@@ -1281,14 +1326,44 @@ impl Router {
             RoutingPolicy::Native => (candidates[0].clone(), DecisionReason::SingleWorker, None, Vec::new(), 0),
             RoutingPolicy::SlotLeastWork | RoutingPolicy::SlotPrefixOnly
             | RoutingPolicy::SlotCacheAwareEct => {
-                let views = self.views(&candidates, &req);
+                let mut views = self.views(&candidates, &req);
+                // Exploration (phase-7 adoption, from llm-d's affinity
+                // filter): with a small probability, price the dispatch as
+                // if NO cache affinity existed. Residency here is inferred,
+                // not authoritative; the explored dispatch's real reuse
+                // telemetry then confirms or contradicts the model
+                // (recorded by the proxy as
+                // `scheduler_affinity_exploration_total{outcome}`).
+                let mut explored: Option<BypassRecord> = None;
+                if self.policy == RoutingPolicy::SlotCacheAwareEct
+                    && self.config.prefix_exploration_probability > 0.0
+                    && views.iter().any(|v| v.reusable_tokens > 0)
+                    && self.exploration_roll()
+                {
+                    let abandoned = views.iter().max_by(|a, b| {
+                        a.cache_savings_ms.total_cmp(&b.cache_savings_ms)
+                    });
+                    let record = abandoned.map(|v| BypassRecord {
+                        reason: "exploration",
+                        worker_id: v.worker_id.clone(),
+                        slot: v.slot,
+                        forgone_savings_ms: v.cache_savings_ms,
+                        forgone_match_tokens: v.reusable_tokens,
+                    });
+                    for v in &mut views {
+                        v.reusable_tokens = 0;
+                        v.cache_savings_ms = 0.0;
+                    }
+                    explored = record;
+                }
                 let chosen = self.pick(&views);
+                let exploration = explored;
                 // The contention gate (phase 4C): ask the marginal question
                 // for the dispatch that would actually happen. A winner
                 // with full cache reuse adds no prefill — joining cache is
                 // never an anti-scaling act, so only recomputing dispatches
                 // can be held. Client pins never reach this path.
-                if gate {
+                if gate && exploration.is_none() {
                     if let Some(cal) = candidates.first().map(|w| w.calibration()) {
                         let active = cal.active_prefills();
                         let recompute =
@@ -1304,7 +1379,10 @@ impl Router {
                     }
                 }
                 let reason = self.slot_reason(&views, chosen);
-                let bypass = self.bypass_record(&views, chosen);
+                let bypass = match exploration {
+                    Some(record) => Some(record),
+                    None => self.bypass_record(&views, chosen),
+                };
                 let winner = candidates[chosen].clone();
                 (winner, reason, bypass, views, chosen)
             }
@@ -1585,6 +1663,52 @@ mod tests {
             SelectOutcome::Unschedulable { label, detail } => {
                 panic!("expected a decision, got Unschedulable ({label}: {detail})")
             }
+        }
+    }
+
+    #[test]
+    fn exploration_distrusts_residency_and_records_the_forgone_affinity() {
+        let warm = slot("warm", 0);
+        warm.note_slot_completion(7, 11_400, 11_400); // RESIDENT for hash 7
+        let cold = slot("cold", 1);
+        let r = Router::with_config(
+            vec![warm, cold],
+            RoutingPolicy::SlotCacheAwareEct,
+            RouterConfig { prefix_exploration_probability: 1.0, ..Default::default() },
+        )
+        .unwrap();
+        match r.select_reserved(shape(7, 11_400, 100)) {
+            SelectOutcome::Decided(d) => {
+                // Exploration opens the gate; the picker may still keep the
+                // warm slot on a tie. What MUST change: every candidate was
+                // priced as if no cache existed, and the forgone affinity
+                // is recorded.
+                assert!(d.candidates.iter().all(|v| v.reusable_tokens == 0),
+                    "explored dispatch must price candidates without cache");
+                let b = d.bypass.expect("exploration must carry a bypass record");
+                assert_eq!(b.reason, "exploration");
+                assert_eq!(b.worker_id, "warm");
+                assert!(b.forgone_savings_ms > 0.0, "the abandoned affinity had value");
+            }
+            _ => panic!("expected a decision"),
+        }
+
+        // Default (probability 0): the warm slot is priced with its reuse
+        // and wins; no exploration bypass.
+        let warm = slot("warm", 0);
+        warm.note_slot_completion(7, 11_400, 11_400);
+        let r = Router::with_config(
+            vec![warm, worker("cold")],
+            RoutingPolicy::SlotCacheAwareEct,
+            RouterConfig::default(),
+        )
+        .unwrap();
+        match r.select_reserved(shape(7, 11_400, 100)) {
+            SelectOutcome::Decided(d) => {
+                assert_eq!(d.worker.id, "warm");
+                assert!(d.bypass.is_none(), "no bypass when the affinity is honored");
+            }
+            _ => panic!("expected a decision"),
         }
     }
 

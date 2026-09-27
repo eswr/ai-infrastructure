@@ -222,6 +222,10 @@ pub struct StreamCtx {
     pub work_estimate: DispatchTicket,
     /// Total estimated service time for saved-compute accounting.
     pub est_total_ms: f64,
+    /// Set when the router explored against inferred cache residency
+    /// (phase-7 adoption): real reuse telemetry then confirms or
+    /// contradicts the model.
+    pub explored_affinity: bool,
     /// Requested service class. Interactive violations of the TTFT SLO
     /// (below) are the autoscaler's quality signal (phase 5).
     pub service_class: ServiceClass,
@@ -521,6 +525,23 @@ impl<S> InstrumentedStream<S> {
             if let (Some(dec), 2..) = (tl.decode_phase(), tl.output_tokens) {
                 w.record_decode(tl.output_tokens, dec.as_secs_f64() * 1000.0, &self.ctx.work_estimate);
             }
+        }
+
+        // Exploration bookkeeping (phase-7 adoption): the dispatch was
+        // priced without a cache affinity the model believed in. The
+        // runtime's own reuse telemetry is the verdict — reuse found where
+        // the model priced none CONTRADICTS the model; none found
+        // confirms that distrusting it was safe.
+        if self.ctx.explored_affinity {
+            let outcome = match (matches!(outcome, Outcome::Completed), tl.reused_tokens_reported)
+            {
+                (true, Some(r)) if r > 0 => "contradicted",
+                (true, _) => "confirmed",
+                _ => "unobserved",
+            };
+            m.scheduler_affinity_exploration_total
+                .with_label_values(&[outcome])
+                .inc();
         }
 
         // Interactive SLO accounting (phase 5): the autoscaler scales on
@@ -843,6 +864,7 @@ mod tests {
             stream_mode: true,
             work_estimate,
             est_total_ms: 100.0,
+            explored_affinity: false,
             service_class: inference_lab_scheduler::ServiceClass::Standard,
             interactive_slo: None,
         };
