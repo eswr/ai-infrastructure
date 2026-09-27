@@ -107,7 +107,10 @@ def reset_fleet():
     for d, n in [("fleet-node-gpu-01", 2), ("fleet-node-gpu-02", 1),
                  ("fleet-node-gpu-03", 1)]:
         kubectl("scale", "deploy", d, f"--replicas={n}")
-    kubectl("delete", "pods", "-l", fleet_pods(), "--wait=false")
+    # BLOCKING delete: the old pods must be GONE from the API before we
+    # wait for readiness, or the readiness poll passes on stale registry
+    # entries and the next dispatch lands on a dying pod (502).
+    kubectl("delete", "pods", "-l", fleet_pods())
 
     def nodes_settled():
         for n in status()["nodes"]:
@@ -122,6 +125,16 @@ def reset_fleet():
         return all(n["state"] == "ready" for n in status()["nodes"]) or None
     wait(nodes_settled, 90, "all nodes back to READY via admin recovery")
     wait_registry_ready_gpus()
+    # The exporter re-derives its inventory from /status on a ~5 s poll:
+    # its UUIDs must MATCH the gateway registry before injections are
+    # meaningful (a stale uuid injects into the void).
+    def exporter_synced():
+        gw_uuids = {w["gpu"]["uuid"] for w in status()["workers"] if w.get("gpu")}
+        if not gw_uuids:
+            return None
+        state = http("GET", f"{DCGM}/state", timeout=5)[1]
+        return set(state.keys()) == gw_uuids or None
+    wait(exporter_synced, 60, "exporter inventory matches gateway registry")
 
 
 def node_state(node):
