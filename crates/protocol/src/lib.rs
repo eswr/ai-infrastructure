@@ -52,6 +52,30 @@ pub struct ChatCompletionRequest {
     /// ordinary OpenAI servers ignore the unknown field entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_class: Option<String>,
+    /// Lab extension (phase 6A): datacenter placement requirements for a
+    /// heterogeneous accelerator fleet. When absent the gateway performs NO
+    /// placement filtering — requests behave exactly as on the homogeneous
+    /// lab fleet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<PlacementRequirements>,
+}
+
+/// What a request demands from the accelerator it lands on (phase 6A).
+/// `model_memory_gb` overrides the registry estimate when the caller knows
+/// better; otherwise the gateway estimates
+/// `weights + kv_cache(context) + runtime_overhead` with a safety margin
+/// and rejects impossible placements BEFORE dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlacementRequirements {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_memory_gb: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tensor_parallel_size: Option<u32>,
+    /// e.g. `nvidia-h100` | `nvidia-l40s` | `nvidia-a10` | `apple-m5`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accelerator: Option<String>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -71,6 +95,7 @@ impl ChatCompletionRequest {
                 content: prompt.into(),
             }],
             stream: false,
+            placement: None,
             max_tokens: default_max_tokens(),
             temperature: default_temperature(),
             top_p: None,

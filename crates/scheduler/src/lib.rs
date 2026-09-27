@@ -75,9 +75,16 @@ use inference_lab_worker_lifecycle::{
     WorkerState,
 };
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
+
+pub mod placement;
+pub use inference_lab_protocol::PlacementRequirements;
+pub use placement::{
+    filter as placement_filter, pass_all as placement_pass_all, MemoryEstimate, ModelEntry,
+    PlacementOutcome, PlacementReject, NODE_GATE_CLOSED, NODE_GATE_OPEN, NODE_GATE_RESIDENT_ONLY,
+};
 
 pub mod calibration;
 pub use calibration::{
@@ -196,7 +203,7 @@ impl ServiceClass {
 }
 
 /// What the router needs to know about the request being placed.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RequestShape {
     /// Prompt-prefix hash (prefix-cache affinity + prefill discount).
     pub prefix_hash: u64,
@@ -204,6 +211,11 @@ pub struct RequestShape {
     pub input_tokens: u64,
     /// Requested output tokens (`max_tokens`).
     pub output_tokens: u64,
+    /// The requested model — placement residency and registry lookup key.
+    pub model: String,
+    /// Phase-6A placement requirements. `None` = NO placement filtering
+    /// (the homogeneous-fleet behavior everything else was built on).
+    pub placement: Option<PlacementRequirements>,
     /// A client-supplied `id_slot` pin: route to exactly that slot when
     /// the router models slots. External cache warmers use this to teach
     /// the gateway's slot-cache model from real traffic.
@@ -421,6 +433,14 @@ pub enum SelectOutcome {
     Decided(RouteDecision),
     /// Every registered worker is unhealthy.
     AllUnhealthy,
+    /// Placement refused the request fleet-wide BEFORE dispatch (phase 6C):
+    /// not enough memory anywhere, accelerator mismatch, no TP group, or a
+    /// node gate. `label` is the dominant rejection reason for metrics;
+    /// `detail` carries every refusal for the log.
+    Unschedulable {
+        label: &'static str,
+        detail: String,
+    },
     /// The contention gate held this arrival: the measured curve says one
     /// more prefill would lower aggregate throughput. Nothing was
     /// reserved. The caller waits (see [`Router::contention_notify`] /
@@ -502,6 +522,26 @@ pub struct WorkerHandle {
     /// llama.cpp slot index when this handle models one slot of a shared
     /// server (`-np` cell with its own KV cache); `None` = a whole worker.
     pub slot: Option<u32>,
+
+    // -- fleet capabilities (phase 6A) --------------------------------------
+    /// Hosting node in the simulated fleet (`inference-lab.io/node`).
+    pub node_id: Option<String>,
+    /// Accelerator kind, e.g. `nvidia-h100` | `nvidia-l40s` | `apple-m5`.
+    pub accelerator: Option<String>,
+    /// GPU memory the placement gate budgets against (GB).
+    pub vram_gb: Option<f64>,
+    /// Simulated GPU UUID — the correlation key between a request trace and
+    /// DCGM-shaped telemetry (`simulation="true"`).
+    pub gpu_uuid: Option<String>,
+    /// Tensor-parallel group label; members of a group are TP ranks.
+    pub tp_group: Option<String>,
+    /// The model this GPU currently hosts (placement residency: the
+    /// weights are already paid). Set on dispatch under placement semantics.
+    loaded_model: Mutex<Option<String>>,
+    /// Fleet controller's node gate: OPEN / RESIDENT_ONLY / CLOSED.
+    node_gate: AtomicU8,
+    /// The node's state as a label string, for rejection details.
+    node_state_label: Mutex<&'static str>,
     /// Outstanding requests (raw count — LOR baseline and gauges).
     outstanding: AtomicU64,
     /// Lifecycle state machine: four health dimensions, per-reason
@@ -579,6 +619,14 @@ impl WorkerHandle {
             runtime: runtime.into(),
             max_context: 0,
             slot: None,
+            node_id: None,
+            accelerator: None,
+            vram_gb: None,
+            gpu_uuid: None,
+            tp_group: None,
+            loaded_model: Mutex::new(None),
+            node_gate: AtomicU8::new(NODE_GATE_OPEN),
+            node_state_label: Mutex::new("ready"),
             outstanding: AtomicU64::new(0),
             lifecycle: Mutex::new(WorkerLifecycle::new(LifecyclePolicy::default())),
             cal,
@@ -591,6 +639,46 @@ impl WorkerHandle {
     /// The shared server model this handle prices with.
     pub fn calibration(&self) -> Arc<RuntimeCalibration> {
         self.cal.clone()
+    }
+
+    // -- fleet capabilities (phase 6A) ---------------------------------------
+
+    /// Record that this GPU now hosts `model` (weights resident). Bounded:
+    /// a GPU hosts ONE loaded model in this simulation — a different model
+    /// replaces it.
+    pub fn note_model_loaded(&self, model: &str) {
+        if let Ok(mut g) = self.loaded_model.lock() {
+            *g = Some(model.to_string());
+        }
+    }
+
+    /// Is `model` resident on this GPU (weights already paid)?
+    pub fn model_loaded(&self, model: &str) -> bool {
+        self.loaded_model
+            .lock()
+            .map(|g| g.as_deref() == Some(model))
+            .unwrap_or(false)
+    }
+
+    /// Fleet controller writes; the placement gate reads.
+    pub fn set_node_gate(&self, gate: u8, state_label: &'static str) {
+        self.node_gate.store(gate, Ordering::Relaxed);
+        if let Ok(mut g) = self.node_state_label.lock() {
+            *g = state_label;
+        }
+    }
+
+    pub fn node_gate(&self) -> u8 {
+        self.node_gate.load(Ordering::Relaxed)
+    }
+
+    pub fn node_state_label(&self) -> &'static str {
+        *self.node_state_label.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The model currently resident on this GPU, if any (status/telemetry).
+    pub fn loaded_model_label(&self) -> Option<String> {
+        self.loaded_model.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn outstanding(&self) -> u64 {
@@ -996,10 +1084,17 @@ impl Router {
     /// used by tests and the admission estimator's what-ifs). Also records
     /// the prefix on the winner.
     pub fn select(&self, req: RequestShape) -> WorkerOutcome {
-        let candidates = self.healthy_workers();
+        let mut candidates = self.healthy_workers();
         if candidates.is_empty() {
             return WorkerOutcome::AllUnhealthy;
         }
+        if let Some(reqs) = &req.placement {
+            candidates = placement_filter(&candidates, &req.model, reqs).candidates;
+            if candidates.is_empty() {
+                return WorkerOutcome::AllUnhealthy;
+            }
+        }
+        let candidates = candidates;
         let winner = match self.policy {
             RoutingPolicy::LeastOutstandingRequests => {
                 min_by(&candidates, |w| w.outstanding() as f64)
@@ -1079,9 +1174,49 @@ impl Router {
 
     fn select_reserved_inner(&self, req: RequestShape, gate: bool) -> SelectOutcome {
         let _guard = self.select_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let candidates = self.healthy_workers();
+        let mut candidates = self.healthy_workers();
         if candidates.is_empty() {
             return SelectOutcome::AllUnhealthy;
+        }
+        // Placement gate (phase 6C): refuse impossible dispatches before
+        // any pricing. Requests without requirements skip it entirely.
+        if let Some(reqs) = &req.placement {
+            let outcome = placement_filter(&candidates, &req.model, reqs);
+            if outcome.candidates.is_empty() {
+                let mut counts: Vec<(&'static str, usize)> = Vec::new();
+                for (_, r) in &outcome.rejections {
+                    let label = r.label();
+                    if let Some(c) = counts.iter_mut().find(|(l, _)| *l == label) {
+                        c.1 += 1;
+                    } else {
+                        counts.push((label, 1));
+                    }
+                }
+                counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+                let label = counts.first().map(|(l, _)| *l).unwrap_or("rejected");
+                let detail = outcome
+                    .rejections
+                    .iter()
+                    .map(|(id, r)| format!("{}: {}", id, r.detail()))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                tracing::info!(
+                    model = %req.model,
+                    rejections = outcome.rejections.len(),
+                    %label,
+                    "placement: request unschedulable fleet-wide"
+                );
+                return SelectOutcome::Unschedulable { label, detail };
+            }
+            for (id, r) in &outcome.rejections {
+                tracing::info!(
+                    worker = %id,
+                    reason = r.label(),
+                    detail = r.detail(),
+                    "placement: candidate rejected"
+                );
+            }
+            candidates = outcome.candidates;
         }
 
         // Client pin: an explicit id_slot is honored when the router
@@ -1096,6 +1231,9 @@ impl Router {
                     let est_total = view.prefill_cost_ms + view.decode_cost_ms;
                     let ticket = w.begin_work(est_total, est_prefill);
                 w.inc_outstanding();
+                if req.placement.is_some() {
+                    w.note_model_loaded(&req.model);
+                }
                 w.note_slot_dispatch(req.prefix_hash, req.input_tokens);
                 w.remember_prefix(req.prefix_hash);
                 return SelectOutcome::Decided(RouteDecision {
@@ -1197,6 +1335,9 @@ impl Router {
         };
         let work_start = winner.begin_work(est_total, est_prefill);
         winner.inc_outstanding();
+        if req.placement.is_some() {
+            winner.note_model_loaded(&req.model);
+        }
         if self.policy.is_slot_policy() {
             winner.note_slot_dispatch(req.prefix_hash, req.input_tokens);
         }
@@ -1424,6 +1565,8 @@ mod tests {
 
     fn shape(prefix: u64, in_tok: u64, out_tok: u64) -> RequestShape {
         RequestShape {
+            model: "test-model".into(),
+            placement: None,
             prefix_hash: prefix,
             input_tokens: in_tok,
             output_tokens: out_tok,
@@ -1439,6 +1582,9 @@ mod tests {
                 "expected a decision, got Held (active={active_prefills}, gain={marginal_gain})"
             ),
             SelectOutcome::AllUnhealthy => panic!("expected a decision"),
+            SelectOutcome::Unschedulable { label, detail } => {
+                panic!("expected a decision, got Unschedulable ({label}: {detail})")
+            }
         }
     }
 

@@ -11,4 +11,5 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 # features add to the workspace tokio's; "sync" is already included there.
 tokio = { workspace = true }
+inference-lab-protocol = { workspace = true }
 inference-lab-worker-lifecycle = { workspace = true }
