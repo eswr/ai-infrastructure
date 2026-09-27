@@ -72,6 +72,9 @@
 //! Probes and requests produce [`HealthObservation`]s; the gateway and the
 //! benchmark harness translate those into the same transitions.
 
+pub mod node;
+pub use node::{NodeEvent, NodeEventKind, NodeLifecycle, NodeState, NodeTransition};
+
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -156,6 +159,9 @@ pub enum FailureReason {
     StreamStalled,
     /// Host memory pressure suspected (external actor report).
     MemoryPressure,
+    /// Sustained high GPU temperature / throttling (fleet telemetry,
+    /// phase 6E). Accumulating: one hot reading must not flap a worker.
+    ThermalThrottling,
     /// A restart was commanded (external actor), not observed.
     Restarting,
 }
@@ -171,6 +177,7 @@ impl FailureReason {
             Self::MalformedResponse => "malformed_response",
             Self::StreamStalled => "stream_stalled",
             Self::MemoryPressure => "memory_pressure",
+            Self::ThermalThrottling => "thermal_throttling",
             Self::Restarting => "restarting",
         }
     }
