@@ -440,16 +440,28 @@ def scenario_autoscale():
 SCENARIOS = [scenario_discovery, scenario_readiness_failure, scenario_recovery,
              scenario_drain, scenario_rolling_replacement, scenario_autoscale]
 
+# Friendly names for partial runs: `run_k8s_check.py autoscale`.
+# Every invocation starts from hard_reset(), so any subset is safe.
+SCENARIO_NAMES = [sc.__name__.removeprefix("scenario_") for sc in SCENARIOS]
+
 
 def main() -> int:
     t0 = time.time()
     s, _ = http("GET", f"{GW}/healthz", timeout=5)
     assert s == 200, f"gateway not reachable at {GW} — run `make k8s-up` first"
-    log("gateway up; suite target: < 8 min, mock workers only")
+    wanted = sys.argv[1:]
+    unknown = [w for w in wanted if w not in SCENARIO_NAMES]
+    if unknown:
+        sys.exit(f"unknown scenario(s): {', '.join(unknown)} — "
+                 f"choose from: {', '.join(SCENARIO_NAMES)}")
+    selected = ([sc for sc in SCENARIOS
+                 if sc.__name__.removeprefix("scenario_") in wanted]
+                if wanted else SCENARIOS)
+    log(f"gateway up; {len(selected)} scenario(s); suite target: < 8 min, mock workers only")
     hard_reset()  # fresh worker pool whatever a previous run left behind
     log("")
     failed = []
-    for sc in SCENARIOS:
+    for sc in selected:
         try:
             sc()
         except Exception as e:
@@ -463,10 +475,10 @@ def main() -> int:
         print()
     mins = (time.time() - t0) / 60
     if failed:
-        log(f"k8s-check: {len(SCENARIOS) - len(failed)}/{len(SCENARIOS)} passed "
+        log(f"k8s-check: {len(selected) - len(failed)}/{len(selected)} passed "
             f"({mins:.1f} min); FAILED: {', '.join(failed)}")
         return 1
-    log(f"k8s-check: {len(SCENARIOS)}/{len(SCENARIOS)} scenarios passed "
+    log(f"k8s-check: {len(selected)}/{len(selected)} scenarios passed "
         f"in {mins:.1f} min")
     return 0
 

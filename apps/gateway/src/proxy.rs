@@ -226,6 +226,10 @@ pub struct StreamCtx {
     /// (phase-7 adoption): real reuse telemetry then confirms or
     /// contradicts the model.
     pub explored_affinity: bool,
+    /// The decision ring plus this request's entry id: `finish` backfills
+    /// the measured first-token latency so consumers see predicted vs
+    /// actual side by side.
+    pub decisions: Option<(std::sync::Arc<crate::decisions::DecisionRing>, u64)>,
     /// Requested service class. Interactive violations of the TTFT SLO
     /// (below) are the autoscaler's quality signal (phase 5).
     pub service_class: ServiceClass,
@@ -482,6 +486,14 @@ impl<S> InstrumentedStream<S> {
             m.scheduler_ttft_prediction_abs_error
                 .with_label_values(&[regime[0].value.as_str(), regime[1].value.as_str(), regime[2].value.as_str()])
                 .observe(error_s.abs());
+        }
+        // The console's predicted-vs-actual row (GET /decisions): attach
+        // the measurement whenever a first token was seen, even when the
+        // policy exported no estimate to compare it against.
+        if let Some((ring, id)) = &self.ctx.decisions {
+            if let Some(actual) = tl.ttft() {
+                ring.observe_outcome(*id, actual.as_secs_f64() * 1000.0);
+            }
         }
         // Service-time honesty (4B.3): the full own-service estimate vs
         // first-token + decode reality, completed requests only.
@@ -865,6 +877,7 @@ mod tests {
             work_estimate,
             est_total_ms: 100.0,
             explored_affinity: false,
+            decisions: None,
             service_class: inference_lab_scheduler::ServiceClass::Standard,
             interactive_slo: None,
         };

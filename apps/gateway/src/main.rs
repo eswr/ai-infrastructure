@@ -100,6 +100,7 @@
 //! * `OTEL_EXPORTER_OTLP_ENDPOINT`  enables OTLP export (e.g. http://127.0.0.1:4318)
 
 mod admission;
+mod decisions;
 mod discovery;
 mod fleet;
 mod lifecycle;
@@ -163,6 +164,8 @@ struct AppState {
     discovery: Arc<discovery::DiscoveryState>,
     /// Simulated-fleet node lifecycle states (phase 6D).
     nodes: Arc<fleet::NodeTable>,
+    /// Recent routing decisions for observability consumers (console).
+    decisions: Arc<decisions::DecisionRing>,
     dyn_cals: std::sync::Mutex<std::collections::HashMap<String, Arc<RuntimeCalibration>>>,
     cal_machine: String,
     service_defaults: ServiceDefaults,
@@ -191,15 +194,17 @@ fn error_json(status: StatusCode, msg: &str) -> Response {
 
 /// Export a routing decision everywhere it can answer questions later:
 /// root-span attributes, the scheduler.select span's per-candidate table,
-/// Prometheus counters/histograms, and one grep-able log line. This is
-/// the "why did this request deliberately miss the cache?" artifact.
+/// Prometheus counters/histograms, one grep-able log line, and the
+/// decision ring (`GET /decisions`). This is the "why did this request
+/// deliberately miss the cache?" artifact. Returns the ring entry id for
+/// outcome backfill.
 fn record_decision(
     st: &AppState,
     root: &telemetry::SpanHandle,
     sel_span: Option<&telemetry::SpanHandle>,
     d: &RouteDecision,
     prefix_hash: u64,
-) {
+) -> u64 {
     let chosen = d.candidates.get(d.chosen);
     let mut attrs = vec![
         KeyValue::new("scheduler.policy", d.policy.as_str()),
@@ -318,6 +323,46 @@ fn record_decision(
         candidates = %table,
         "routing decision"
     );
+
+    st.decisions.push(serde_json::json!({
+        "ts_ms": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        "policy": d.policy.as_str(),
+        "worker": d.worker.id,
+        "slot": d.worker.slot,
+        "reason": d.reason.as_str(),
+        "bypass": d.bypass.as_ref().map(|b| serde_json::json!({
+            "reason": b.reason,
+            "worker_id": b.worker_id,
+            "slot": b.slot,
+            "forgone_savings_ms": b.forgone_savings_ms,
+            "forgone_match_tokens": b.forgone_match_tokens,
+        })),
+        "prefix_hash": format!("{prefix_hash:016x}"),
+        "estimated_ttft_ms": chosen.map(|v| v.estimated_ttft_ms),
+        "estimated_queue_ms": chosen.map(|v| v.remaining_work_ms),
+        "cache_savings_ms": chosen.map(|v| v.cache_savings_ms),
+        "candidates": d
+            .candidates
+            .iter()
+            .enumerate()
+            .map(|(i, v)| serde_json::json!({
+                "label": v.slot.map(|s| s.to_string()).unwrap_or_else(|| v.worker_id.clone()),
+                "worker_id": v.worker_id,
+                "slot": v.slot,
+                "reusable_tokens": v.reusable_tokens,
+                "cache_savings_ms": v.cache_savings_ms,
+                "queue_ms": v.remaining_work_ms,
+                "prefill_ms": v.prefill_cost_ms,
+                "estimated_ttft_ms": v.estimated_ttft_ms,
+                "cache_state": v.cache_state.as_str(),
+                "chosen": i == d.chosen,
+            }))
+            .collect::<Vec<_>>(),
+        "actual_ttft_ms": serde_json::Value::Null,
+    }))
 }
 
 /// Hash the leading prompt content — the part a prefix cache would key on.
@@ -641,7 +686,7 @@ async fn chat_completions(
             .scheduler_contention_gate_hold_seconds
             .observe(gate_held.as_secs_f64());
     }
-    record_decision(&st, &root, Some(&sel_span), &decision, shape.prefix_hash);
+    let mut decision_id = record_decision(&st, &root, Some(&sel_span), &decision, shape.prefix_hash);
     sel_span.span().end();
 
     // ---- dispatch (one re-route attempt on connect failure) -----------------
@@ -750,7 +795,7 @@ async fn chat_completions(
                 // reservation included, so the retry prices itself in.
                 match st.router.select_reserved(shape.clone()) {
                     SelectOutcome::Decided(d2) if d2.worker.id != worker.id => {
-                        record_decision(&st, &root, None, &d2, shape.prefix_hash);
+                        decision_id = record_decision(&st, &root, None, &d2, shape.prefix_hash);
                         tracing::warn!(from = %worker.id, to = %d2.worker.id, "connect failure, re-routing");
                         worker = d2.worker.clone();
                         decision = d2;
@@ -829,6 +874,7 @@ async fn chat_completions(
             .bypass
             .as_ref()
             .is_some_and(|b| b.reason == "exploration"),
+        decisions: Some((st.decisions.clone(), decision_id)),
         service_class,
         interactive_slo: st.interactive_slo,
     };
@@ -860,6 +906,17 @@ async fn list_models(State(st): State<Arc<AppState>>) -> Response {
 
 async fn healthz() -> Response {
     Json(serde_json::json!({"status": "ok"})).into_response()
+}
+
+/// Recent routing decisions (chronological, capped ring) for the lab
+/// console: the per-candidate table, the reason, and — once the request
+/// closes — the measured TTFT next to the estimate.
+///
+/// Best-effort in-memory diagnostic history. Entries are ephemeral,
+/// bounded, and not part of scheduler correctness or persistence; ids
+/// are monotonically increasing per process for stream dedup/reconnect.
+async fn decisions(State(st): State<Arc<AppState>>) -> Response {
+    Json(serde_json::json!({ "decisions": st.decisions.snapshot() })).into_response()
 }
 
 /// Rich operational snapshot for tests and humans.
@@ -1591,6 +1648,7 @@ async fn main() -> anyhow::Result<()> {
         calibrations,
         discovery: Arc::new(discovery::DiscoveryState::default()),
         nodes: Arc::new(fleet::NodeTable::default()),
+        decisions: Arc::new(decisions::DecisionRing::default()),
         dyn_cals: std::sync::Mutex::new(std::collections::HashMap::new()),
         cal_machine: cal_machine.clone(),
         service_defaults,
@@ -1615,6 +1673,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/", get(root))
         .route("/healthz", get(healthz))
         .route("/status", get(status))
+        .route("/decisions", get(decisions))
         .route("/metrics", get(metrics_endpoint))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
