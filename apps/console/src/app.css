@@ -1,0 +1,197 @@
+/* Inference Lab Console — dark ops theme. State is never color-only:
+   every dot is paired with the state text. */
+
+:root {
+  --bg: #0b0f14;
+  --panel: #11161d;
+  --border: #1f2937;
+  --text: #d1d5db;
+  --muted: #6b7280;
+  --ok: #4ade80;
+  --warn: #fbbf24;
+  --info: #60a5fa;
+  --bad: #f87171;
+  --idle: #9ca3af;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+
+#root { display: flex; flex-direction: column; height: 100vh; }
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+header h1 { font-size: 14px; margin: 0; letter-spacing: 0.08em; }
+.live { display: inline-flex; align-items: center; gap: 6px; }
+.live .dot { background: var(--ok) !important; animation: pulse 1.6s infinite; }
+.live.down .dot { background: var(--bad) !important; animation: none; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+.scope-legend { margin-left: auto; display: flex; gap: 8px; }
+
+main {
+  flex: 1;
+  display: flex;
+  gap: 10px;
+  padding: 10px;
+  min-height: 0;
+}
+.col-left { width: 400px; display: flex; min-height: 0; }
+.col-left > * { flex: 1; }
+.col-right {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  min-height: 0;
+}
+.col-right > .flow { flex: 1.15; }
+.row-bottom { flex: 1; display: flex; gap: 10px; min-height: 0; }
+.row-bottom > .timeline { flex: 1.2; }
+.row-bottom > .controls { flex: 1; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  overflow: auto;
+  min-height: 0;
+}
+.panel h2 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+
+/* fleet cards */
+.fleet-cards { display: flex; flex-direction: column; gap: 10px; }
+.node-card { border: 1px solid var(--border); border-radius: 6px; padding: 10px; }
+.node-head { display: flex; justify-content: space-between; align-items: baseline; }
+.node-id { font-weight: 700; }
+.node-sub { margin: 4px 0; color: var(--muted); }
+.node-foot { margin: 8px 0 0; color: var(--muted); font-size: 11px; }
+.worker-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-top: 1px solid var(--border);
+}
+.worker-id { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.worker-meta { color: var(--muted); font-size: 11px; }
+
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--idle); }
+.dot.ok { background: var(--ok); }
+.dot.warn { background: var(--warn); }
+.dot.info { background: var(--info); }
+.dot.bad { background: var(--bad); }
+.dot.idle { background: var(--idle); }
+
+.state-text.ok { color: var(--ok); }
+.state-text.warn { color: var(--warn); }
+.state-text.info { color: var(--info); }
+.state-text.bad { color: var(--bad); }
+.state-text.idle { color: var(--idle); }
+
+.badge {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: 0.08em;
+}
+.badge.sim { background: #1e293b; color: #93c5fd; border: 1px solid #334155; }
+.badge.meas { background: #14532d33; color: var(--ok); border: 1px solid #166534; }
+.badge.mock { background: #3b2f1633; color: var(--warn); border: 1px solid #92400e; }
+
+/* request flow */
+.pipeline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.stage { text-align: center; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; }
+.stage-name { font-size: 10px; color: var(--muted); letter-spacing: 0.1em; }
+.stage-value { font-size: 12px; margin-top: 2px; }
+.pipe { color: var(--muted); }
+
+.decision { border-top: 1px solid var(--border); padding-top: 10px; }
+.decision-head { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.chosen-line { font-weight: 700; }
+.bypass { color: var(--warn); margin: 6px 0; }
+table.cand { width: 100%; border-collapse: collapse; margin-top: 6px; }
+.cand th {
+  text-align: right;
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.cand th:first-child, .cand td:first-child { text-align: left; }
+.cand td { text-align: right; padding: 3px 8px; }
+.cand tr.chosen td { color: var(--ok); font-weight: 700; }
+.pred-actual { display: flex; gap: 18px; margin-top: 8px; }
+.decision[data-flash] { transition: none; }
+
+/* timeline */
+.feed { list-style: none; margin: 0; padding: 0; }
+.feed li { display: flex; gap: 10px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+.feed .ts { color: var(--muted); }
+
+/* demo controls */
+.controls { display: flex; flex-direction: column; }
+.controls-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.controls button {
+  background: #16202b;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.controls button:hover:not(:disabled) { border-color: var(--info); }
+.controls button:disabled { opacity: 0.45; cursor: wait; }
+.running { color: var(--info); }
+.scen-log {
+  flex: 1;
+  min-height: 60px;
+  max-height: 220px;
+  overflow: auto;
+  background: #0b0f14;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 11px;
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+}
+.footer-note { font-size: 10px; margin: 8px 0 0; }
+
+/* metrics bar */
+.metrics-bar {
+  display: flex;
+  gap: 24px;
+  align-items: center;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+.metric { display: flex; flex-direction: column; }
+.metric-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; }
+.metric-value { font-size: 15px; }
+.gateway { margin-left: auto; font-size: 11px; }
+
+.muted { color: var(--muted); }
+.mono { font-family: inherit; }

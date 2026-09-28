@@ -22,3 +22,7 @@ tmp/
 *.gguf
 *.safetensors
 rendered/
+
+# Console frontend (build artifacts + deps; source is committed)
+apps/console/node_modules/
+apps/console/dist/

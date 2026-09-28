@@ -127,7 +127,8 @@ Minute-scale, deterministic demo flows and the eight-number results page:
 ## Layout
 
 ```text
-apps/          gateway (Rust/Axum: admission+scheduler+telemetry proxy) · loadgen
+apps/          gateway (Rust/Axum: admission+scheduler+telemetry proxy) · loadgen ·
+               console (DEV/DEMO control-plane visualization; apps/console/README.md)
 crates/        protocol · scheduler (service model + policies) · streaming (SSE) ·
                metrics (TTFT/ITL/TPOT aggregation) · workload (scenarios)
 workers/       mlx-lm · llama-cpp · vllm-metal · mock-gpu

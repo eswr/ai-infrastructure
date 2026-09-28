@@ -12,7 +12,8 @@ MOCK_IMAGE ?= inference-lab/mock-worker:phase5
         worker-mlx worker-llama worker-vllm worker-mock gateway \
         up down obs-logs k8s k8s-images k8s-up k8s-deploy k8s-render k8s-check k8s-demo k8s-bridge-check \
         fleet-check k8s-status k8s-down slurm-up slurm-demo slurm-down \
-        demo-metal demo-wedge demo-admission demo-k8s demo-placement demo-fleet-failure demo-slurm
+        demo-metal demo-wedge demo-admission demo-k8s demo-placement demo-fleet-failure demo-slurm \
+        console-install console-build console
 
 setup:            ## fresh-checkout bootstrap: toolchain checks + workspace build
 	@command -v cargo >/dev/null 2>&1 || { echo "ERROR: rust not found — install via https://rustup.rs"; exit 1; }
@@ -127,6 +128,22 @@ demo-slurm: ## live: Slurm GRES vocabulary — starts the compose lab if needed 
 	docker compose -f deploy/slurm/docker-compose.yml up -d
 	@sleep 6
 	bash experiments/slurm/exercises.sh
+
+# --------------------------------------------------------------- console --
+# Real-time control-plane visualization (DEV / DEMO ONLY, loopback only).
+# The backend projects the gateway's /status + /metrics + /decisions and
+# streams SSE; demo buttons run the SAME fixed scenario commands as the
+# demo-* targets. See apps/console/README.md.
+
+console-install:  ## once: install console frontend deps
+	cd apps/console && npm install
+
+console-build: console-install  ## build the SPA into apps/console/dist
+	cd apps/console && npm run build
+
+console:          ## serve the console on http://127.0.0.1:8099 (needs a gateway)
+	cd apps/console && npm run build
+	node apps/console/server.mjs
 
 # ------------------------------------------------------- observability --
 
