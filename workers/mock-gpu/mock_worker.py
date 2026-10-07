@@ -185,7 +185,7 @@ def _gen_text(n: int, seed: int) -> str:
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, fmt, *args):  # quieter logs
+    def log_message(self, format: str, *args: object) -> None:  # quieter logs
         pass
 
     # ---- helpers -------------------------------------------------------

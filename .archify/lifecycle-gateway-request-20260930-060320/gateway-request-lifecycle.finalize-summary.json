@@ -1,0 +1,312 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "lifecycle",
+  "quality": "showcase",
+  "specification": {
+    "path": "/Users/eswr/code/ai-infrastructure/.archify/lifecycle-gateway-request-20260930-060320/candidate.json",
+    "sha256": "606f470376e98a1bd49f19f0bcb84750b853af7e8869fdac2748969f84e2de48",
+    "bytes": 5465
+  },
+  "artifact": {
+    "path": "/Users/eswr/code/ai-infrastructure/.archify/lifecycle-gateway-request-20260930-060320/gateway-request-lifecycle.html",
+    "sha256": "fb1fa09ba1eb21f90ca3be61c8b728ac3cf8be26a616546d7476ecfa2c0baa77",
+    "bytes": 776476
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "/Users/eswr/code/ai-infrastructure/.archify/lifecycle-gateway-request-20260930-060320/gateway-request-lifecycle.finalize.json",
+    "summaryReceipt": "/Users/eswr/code/ai-infrastructure/.archify/lifecycle-gateway-request-20260930-060320/gateway-request-lifecycle.finalize-summary.json",
+    "browserCheckReceipt": "/Users/eswr/code/ai-infrastructure/.archify/lifecycle-gateway-request-20260930-060320/gateway-request-lifecycle.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.0.1",
+    "availableVersion": "3.0.1",
+    "releaseNotes": null,
+    "checkedAt": "2026-09-29T03:55:37.843Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 2324,
+  "visualReviewRecommendation": {
+    "action": "inspect-route-readability",
+    "signals": {
+      "resolvedCrossovers": 7,
+      "routesOverSuggestedBends": 4,
+      "routesOverSuggestedStretch": 1
+    },
+    "reason": "Automated gates passed, but crossings or detours still need perceptual review before claiming visual quality.",
+    "affectedRoutes": {
+      "crossings": [
+        {
+          "left": {
+            "id": "headers",
+            "from": "dispatch",
+            "to": "first-token",
+            "label": "",
+            "collectionIndex": 7,
+            "artifactIndex": 8
+          },
+          "right": {
+            "id": "complete",
+            "from": "streaming",
+            "to": "completed",
+            "label": "upstream end",
+            "collectionIndex": 9,
+            "artifactIndex": 10
+          },
+          "point": [
+            962,
+            216
+          ]
+        },
+        {
+          "left": {
+            "id": "headers",
+            "from": "dispatch",
+            "to": "first-token",
+            "label": "",
+            "collectionIndex": 7,
+            "artifactIndex": 8
+          },
+          "right": {
+            "id": "stream-timeout",
+            "from": "streaming",
+            "to": "failed",
+            "label": "stall / upstream error",
+            "collectionIndex": 14,
+            "artifactIndex": 15
+          },
+          "point": [
+            952,
+            216
+          ]
+        },
+        {
+          "left": {
+            "id": "headers",
+            "from": "dispatch",
+            "to": "first-token",
+            "label": "",
+            "collectionIndex": 7,
+            "artifactIndex": 8
+          },
+          "right": {
+            "id": "active-cancel",
+            "from": "streaming",
+            "to": "cancelled",
+            "label": "client disconnect",
+            "collectionIndex": 15,
+            "artifactIndex": 16
+          },
+          "point": [
+            895,
+            144
+          ]
+        },
+        {
+          "left": {
+            "id": "complete",
+            "from": "streaming",
+            "to": "completed",
+            "label": "upstream end",
+            "collectionIndex": 9,
+            "artifactIndex": 10
+          },
+          "right": {
+            "id": "first-timeout",
+            "from": "first-token",
+            "to": "failed",
+            "label": "first-token timeout",
+            "collectionIndex": 13,
+            "artifactIndex": 14
+          },
+          "point": [
+            962,
+            594
+          ]
+        },
+        {
+          "left": {
+            "id": "dispatch-failure",
+            "from": "dispatch",
+            "to": "reroute",
+            "label": "connect error",
+            "collectionIndex": 10,
+            "artifactIndex": 11
+          },
+          "right": {
+            "id": "active-cancel",
+            "from": "streaming",
+            "to": "cancelled",
+            "label": "client disconnect",
+            "collectionIndex": 15,
+            "artifactIndex": 16
+          },
+          "point": [
+            805,
+            144
+          ]
+        },
+        {
+          "left": {
+            "id": "retry",
+            "from": "reroute",
+            "to": "dispatch",
+            "label": "different worker",
+            "collectionIndex": 11,
+            "artifactIndex": 12
+          },
+          "right": {
+            "id": "active-cancel",
+            "from": "streaming",
+            "to": "cancelled",
+            "label": "client disconnect",
+            "collectionIndex": 15,
+            "artifactIndex": 16
+          },
+          "point": [
+            835,
+            144
+          ]
+        },
+        {
+          "left": {
+            "id": "dispatch-failed",
+            "from": "dispatch",
+            "to": "failed",
+            "label": "HTTP error / no retry",
+            "collectionIndex": 12,
+            "artifactIndex": 13
+          },
+          "right": {
+            "id": "active-cancel",
+            "from": "streaming",
+            "to": "cancelled",
+            "label": "client disconnect",
+            "collectionIndex": 15,
+            "artifactIndex": 16
+          },
+          "point": [
+            865,
+            144
+          ]
+        }
+      ],
+      "detours": [
+        {
+          "relationship": {
+            "id": "reject",
+            "from": "admission",
+            "to": "rejected",
+            "label": "overload / cap",
+            "collectionIndex": 5,
+            "artifactIndex": 6
+          },
+          "bends": 4,
+          "stretch": 1.453,
+          "directCorridorBlockers": [
+            {
+              "id": "queued",
+              "label": "Queued",
+              "box": [
+                300,
+                240,
+                140,
+                64
+              ]
+            }
+          ]
+        },
+        {
+          "relationship": {
+            "id": "complete",
+            "from": "streaming",
+            "to": "completed",
+            "label": "upstream end",
+            "collectionIndex": 9,
+            "artifactIndex": 10
+          },
+          "bends": 4,
+          "stretch": 1.348,
+          "directCorridorBlockers": [
+            {
+              "id": "first-token",
+              "label": "First-token Wait",
+              "box": [
+                984,
+                240,
+                140,
+                64
+              ]
+            }
+          ]
+        },
+        {
+          "relationship": {
+            "id": "dispatch-failed",
+            "from": "dispatch",
+            "to": "failed",
+            "label": "HTTP error / no retry",
+            "collectionIndex": 12,
+            "artifactIndex": 13
+          },
+          "bends": 4,
+          "stretch": 1.275,
+          "directCorridorBlockers": [
+            {
+              "id": "reroute",
+              "label": "Re-route",
+              "box": [
+                780,
+                424,
+                140,
+                64
+              ]
+            }
+          ]
+        },
+        {
+          "relationship": {
+            "id": "stream-timeout",
+            "from": "streaming",
+            "to": "failed",
+            "label": "stall / upstream error",
+            "collectionIndex": 14,
+            "artifactIndex": 15
+          },
+          "bends": 4,
+          "stretch": 1
+        }
+      ],
+      "truncated": false
+    },
+    "hints": [
+      "dispatch → first-token crosses streaming → completed: move the node of whichever is a branch, return, or second entrance to the other side of the main path, so that relationship runs through an empty corridor.",
+      "dispatch → first-token crosses streaming → failed: move the node of whichever is a branch, return, or second entrance to the other side of the main path, so that relationship runs through an empty corridor.",
+      "dispatch → first-token crosses streaming → cancelled: move the node of whichever is a branch, return, or second entrance to the other side of the main path, so that relationship runs through an empty corridor.",
+      "streaming → completed crosses first-token → failed: move the node of whichever is a branch, return, or second entrance to the other side of the main path, so that relationship runs through an empty corridor.",
+      "dispatch → reroute crosses streaming → cancelled: move the node of whichever is a branch, return, or second entrance to the other side of the main path, so that relationship runs through an empty corridor.",
+      "reroute → dispatch crosses streaming → cancelled: move the node of whichever is a branch, return, or second entrance to the other side of the main path, so that relationship runs through an empty corridor.",
+      "dispatch → failed crosses streaming → cancelled: move the node of whichever is a branch, return, or second entrance to the other side of the main path, so that relationship runs through an empty corridor.",
+      "streaming → failed needs 4 bends: move node streaming or failed so they share a row or column with matching centers, or sit diagonally with a clear corner."
+    ],
+    "repair": "Trace these relationships at the desktop viewport. For Architecture, use references/architecture-layout-repair.md: reflow a blocked main path or tangled connected scene, and repair an isolated defect locally only when the surrounding composition is accepted. Preserve all semantic content and user-fixed geometry. Rerun finalize once after the edit."
+  }
+}

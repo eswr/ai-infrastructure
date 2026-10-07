@@ -261,8 +261,9 @@ def load_leg(leg_dir: Path) -> dict | None:
     # 4B.3: regime-split prediction quality from the labeled families.
     ttft_abs = parse_labeled_hist(metrics, "scheduler_ttft_prediction_abs_error_seconds")
     ttft_signed = parse_labeled_hist(metrics, "scheduler_ttft_prediction_error_seconds")
-    actual_ttft_mean = (m(metrics, "inference_ttft_seconds_sum") / m(metrics, "inference_ttft_seconds_count")
-                        if m(metrics, "inference_ttft_seconds_count") else None)
+    ttft_sum = m(metrics, "inference_ttft_seconds_sum")
+    ttft_cnt = m(metrics, "inference_ttft_seconds_count")
+    actual_ttft_mean = ttft_sum / ttft_cnt if ttft_sum is not None and ttft_cnt else None
     regimes = regime_rows(ttft_signed, ttft_abs, actual_ttft_mean) if ttft_abs else []
     return {
         "leg": leg_dir.name,

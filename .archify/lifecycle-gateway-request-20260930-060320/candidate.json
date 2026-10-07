@@ -1,0 +1,58 @@
+{
+  "schema_version": 2,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "Gateway Request Lifecycle",
+    "subtitle": "Implemented handler and streaming-proxy outcomes for one chat-completion request.",
+    "locale": "en",
+    "output": ".archify/lifecycle-gateway-request-20260930-060320/gateway-request-lifecycle.html",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "main", "label": "Main progress" },
+    { "id": "waiting", "label": "Waiting / interruption" },
+    { "id": "recovery", "label": "Bounded recovery" },
+    { "id": "terminal", "label": "Terminal outcomes" }
+  ],
+  "states": [
+    { "id": "received", "type": "start", "label": "Received", "lane": "main", "col": 0, "step": "01" },
+    { "id": "admission", "type": "decision", "label": "Admission", "sublabel": "estimate + decide", "lane": "main", "col": 1, "step": "02" },
+    { "id": "scheduled", "type": "active", "label": "Scheduled", "sublabel": "worker reserved", "lane": "main", "col": 2, "step": "03" },
+    { "id": "dispatch", "type": "active", "label": "Dispatch", "sublabel": "upstream POST", "lane": "main", "col": 3, "step": "04" },
+    { "id": "streaming", "type": "active", "label": "Streaming", "sublabel": "forward + measure", "lane": "main", "col": 4, "step": "05" },
+
+    { "id": "queued", "type": "waiting", "label": "Queued", "sublabel": "await capacity", "lane": "waiting", "col": 1 },
+    { "id": "first-token", "type": "waiting", "label": "First-token Wait", "sublabel": "watchdog optional", "lane": "waiting", "col": 4 },
+
+    { "id": "reroute", "type": "active", "label": "Re-route", "sublabel": "select different worker", "tag": "once", "lane": "recovery", "col": 3 },
+
+    { "id": "rejected", "type": "failure", "label": "Rejected", "sublabel": "429 + Retry-After", "lane": "terminal", "col": 1 },
+    { "id": "cancelled", "type": "failure", "label": "Cancelled", "sublabel": "queued or active", "lane": "terminal", "col": 2 },
+    { "id": "failed", "type": "failure", "label": "Failed", "sublabel": "upstream or timeout", "lane": "terminal", "col": 3 },
+    { "id": "completed", "type": "success", "label": "Completed", "sublabel": "stream ended", "lane": "terminal", "col": 4 }
+  ],
+  "transitions": [
+    { "id": "start", "from": "received", "to": "admission", "label": "estimate work", "variant": "emphasis" },
+    { "id": "admit", "from": "admission", "to": "scheduled", "label": "admit / dequeue", "variant": "emphasis" },
+    { "id": "queue", "from": "admission", "to": "queued", "label": "capacity wait", "variant": "dashed" },
+    { "id": "grant", "from": "queued", "to": "scheduled", "label": "grant", "variant": "emphasis" },
+    { "id": "queued-cancel", "from": "queued", "to": "cancelled", "label": "client disconnect", "variant": "security" },
+    { "id": "reject", "from": "admission", "to": "rejected", "label": "overload / cap", "variant": "security" },
+    { "id": "select", "from": "scheduled", "to": "dispatch", "label": "POST worker", "variant": "emphasis" },
+    { "id": "headers", "from": "dispatch", "to": "first-token", "variant": "emphasis" },
+    { "id": "first-token", "from": "first-token", "to": "streaming", "label": "first token", "variant": "emphasis" },
+    { "id": "complete", "from": "streaming", "to": "completed", "label": "upstream end", "variant": "emphasis" },
+    { "id": "dispatch-failure", "from": "dispatch", "to": "reroute", "label": "connect error", "variant": "security" },
+    { "id": "retry", "from": "reroute", "to": "dispatch", "label": "different worker", "variant": "dashed" },
+    { "id": "dispatch-failed", "from": "dispatch", "to": "failed", "label": "HTTP error / no retry", "variant": "security" },
+    { "id": "first-timeout", "from": "first-token", "to": "failed", "label": "first-token timeout", "variant": "security" },
+    { "id": "stream-timeout", "from": "streaming", "to": "failed", "label": "stall / upstream error", "variant": "security" },
+    { "id": "active-cancel", "from": "streaming", "to": "cancelled", "label": "client disconnect", "variant": "security" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Progress and wait", "items": ["Admission can immediately grant a permit or queue work until capacity is released.", "The gateway starts the first-token watchdog only when configured; the stream watchdog likewise is optional.", "A streaming response can be SSE or JSON; timing and usage are recorded by the proxy."] },
+    { "dot": "amber", "title": "One real retry", "items": ["A connection error triggers one re-selection only when a different healthy worker is available.", "An upstream HTTP error returns failure directly; it is not retried by this handler.", "No general retry policy is depicted because none was found."] },
+    { "dot": "rose", "title": "Every ending is explicit", "items": ["Admission rejection returns 429 with Retry-After.", "Client disconnection cancels both queued work and an active stream; capacity is released through the owned permit.", "First-token timeout, stream stall, and upstream errors end as failures; natural upstream end completes the request."] },
+    { "dot": "violet", "title": "Evidence inspected", "items": ["apps/gateway/src/main.rs: admission outcomes, queue cancellation, dispatch and one re-route.", "apps/gateway/src/proxy.rs: completion, active cancellation, first-token timeout, stall, and upstream-error outcomes.", "apps/gateway/src/admission.rs: permit release and queued cancellation bookkeeping."] }
+  ]
+}

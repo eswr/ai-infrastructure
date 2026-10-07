@@ -147,7 +147,7 @@ def main() -> None:
         slo = metric_value(metrics, "inference_interactive_slo_violations_total")
         now = time.time()
         slo_rate = 0.0
-        if last_slo is not None and now > (last_slo_t or now):
+        if last_slo is not None and last_slo_t is not None and now > last_slo_t:
             slo_rate = max(0.0, (slo - last_slo) / (now - last_slo_t))
         last_slo, last_slo_t = slo, now
 

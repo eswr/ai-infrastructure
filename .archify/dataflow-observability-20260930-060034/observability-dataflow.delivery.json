@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "25f1730e-ae6e-40d8-9213-4ab0f8422796",
+  "status": "current",
+  "command": "deliver",
+  "type": "dataflow",
+  "input": "/Users/eswr/code/ai-infrastructure/.archify/dataflow-observability-20260930-060034/candidate.json",
+  "output": "/Users/eswr/code/ai-infrastructure/.archify/dataflow-observability-20260930-060034/observability-dataflow.html",
+  "specification": {
+    "sha256": "efdc370ed046fa3cdaa6aa1ed2513ec438cd4666b4332277b399c799a781aadf",
+    "bytes": 4426
+  },
+  "artifact": {
+    "sha256": "a4151926ade86d02d121bdc3f02fb9deb0f4cdf0facab073091fbb9604063f26",
+    "bytes": 759621
+  }
+}

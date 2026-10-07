@@ -221,7 +221,7 @@ EXPORTER = Exporter()
 
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *args):  # keep pod logs quiet
+    def log_message(self, format: str, *args: object) -> None:  # keep pod logs quiet
         pass
 
     def _send(self, code, body, ctype="application/json"):

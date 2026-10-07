@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "581decc5-9245-448e-a84e-18f772c3a5bd",
+  "status": "current",
+  "command": "deliver",
+  "type": "sequence",
+  "input": "/Users/eswr/code/ai-infrastructure/.archify/sequence-gateway-request-20260930-054936/candidate.json",
+  "output": "/Users/eswr/code/ai-infrastructure/.archify/sequence-gateway-request-20260930-054936/gateway-request.html",
+  "specification": {
+    "sha256": "ae09f21c784da2abe38129d44cd853be1f50f0e35e990e2e839249d479b8a7ed",
+    "bytes": 4705
+  },
+  "artifact": {
+    "sha256": "58f5ca43a16f531d72b3ee3502045600a99f6afe1f860a45e270882b6f6ed52d",
+    "bytes": 760513
+  }
+}

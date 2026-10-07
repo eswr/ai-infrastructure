@@ -338,10 +338,11 @@ def compare(study_path: Path, out_dir: Path | None) -> int:
            "| runtime | fixed (s) | rate (ms/tok) | points |", "| --- | ---: | ---: | --- |"]
     fits: dict[str, tuple[float, float] | None] = {}
     for name, runs in legs.items():
-        pts = [(float(r.input_tokens), r.get("ttft")) for r in runs
-               if r.concurrency == 1 and r.get("ttft") is not None]
-        fits[name] = linfit(pts)
-        fixed, rate = fits[name] if fits[name] else (None, None)
+        pts = [(float(r.input_tokens), ttft) for r in runs
+               if r.concurrency == 1 and (ttft := r.get("ttft")) is not None]
+        fit = linfit(pts)
+        fits[name] = fit
+        fixed, rate = fit if fit else (None, None)
         md.append(f"| {name} | {fmt_num(fixed and fixed / 1000, 2)} "
                   f"| {fmt_num(rate, 2)} | {len(pts)} |")
 

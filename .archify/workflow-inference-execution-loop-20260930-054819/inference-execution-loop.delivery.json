@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "e4a9bbdf-97ee-46b7-b629-6c733d851d6b",
+  "status": "current",
+  "command": "deliver",
+  "type": "workflow",
+  "input": "/Users/eswr/code/ai-infrastructure/.archify/workflow-inference-execution-loop-20260930-054819/candidate.json",
+  "output": "/Users/eswr/code/ai-infrastructure/.archify/workflow-inference-execution-loop-20260930-054819/inference-execution-loop.html",
+  "specification": {
+    "sha256": "adfc6355978d15a7543ee20a9f866596ba9c4b28914e0cbe63f3477b89cd2e1d",
+    "bytes": 5138
+  },
+  "artifact": {
+    "sha256": "ba42bfa3260614bd94604892622b2aeb43432e79470828f32f0c67c6c7ece1ab",
+    "bytes": 764470
+  }
+}

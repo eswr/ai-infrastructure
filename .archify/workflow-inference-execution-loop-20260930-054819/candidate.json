@@ -1,0 +1,67 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Observed Inference Execution Loop",
+    "subtitle": "The repository implements a gateway-to-model-worker loop, not an agent planner or tool-call runtime.",
+    "locale": "en",
+    "output": ".archify/workflow-inference-execution-loop-20260930-054819/inference-execution-loop.html",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "user", "label": "User surface" },
+    { "id": "agent", "label": "Agent runtime — not implemented" },
+    { "id": "policy", "label": "Policy boundary" },
+    { "id": "exceptions", "label": "Exception handling", "variant": "exception" },
+    { "id": "tools", "label": "Tool execution / upstream inference" },
+    { "id": "obs", "label": "Observability" }
+  ],
+  "phases": [
+    { "id": "request", "label": "Request", "fromCol": 0, "toCol": 1 },
+    { "id": "policy-phase", "label": "Policy", "fromCol": 2, "toCol": 2, "variant": "security" },
+    { "id": "execute", "label": "Execute + report", "fromCol": 3, "toCol": 5, "variant": "emphasis" }
+  ],
+  "groups": [
+    { "id": "policy-group", "label": "Admission control", "lane": "policy", "fromCol": 2, "toCol": 2, "variant": "security" },
+    { "id": "exception-group", "label": "Observed exception outcomes", "lane": "exceptions", "fromCol": 3, "toCol": 4, "variant": "security" },
+    { "id": "evidence-group", "label": "Optional OTLP evidence", "lane": "obs", "fromCol": 4, "toCol": 5, "variant": "dashed" }
+  ],
+  "mainPath": ["client", "runtime", "admission", "worker", "response"],
+  "semanticChecks": {
+    "allowedRoots": ["client", "approval"],
+    "allowedTerminals": ["response", "blocked", "retry", "approval", "collector"],
+    "requiredPaths": [
+      { "from": "client", "to": "response" },
+      { "from": "client", "to": "blocked" },
+      { "from": "worker", "to": "retry" },
+      { "from": "worker", "to": "collector" }
+    ]
+  },
+  "nodes": [
+    { "id": "client", "lane": "user", "col": 0, "type": "external", "label": "Client" },
+    { "id": "response", "lane": "user", "col": 5, "type": "frontend", "label": "Response" },
+    { "id": "runtime", "lane": "agent", "col": 1, "type": "backend", "label": "Runtime", "tag": "no agent loop" },
+    { "id": "admission", "lane": "policy", "col": 2, "type": "security", "label": "Admission", "tag": "work budget" },
+    { "id": "approval", "lane": "policy", "col": 2, "type": "security", "label": "Approval", "tag": "not implemented", "yOffset": 80 },
+    { "id": "blocked", "lane": "exceptions", "col": 3, "type": "security", "label": "Blocked", "tag": "429 or no worker", "yOffset": -48 },
+    { "id": "retry", "lane": "exceptions", "col": 4, "type": "messagebus", "label": "One Re-route", "tag": "connect failure", "yOffset": 48 },
+    { "id": "worker", "lane": "tools", "col": 3, "type": "external", "label": "Model Worker" },
+    { "id": "event", "lane": "obs", "col": 4, "type": "database", "label": "Evidence" },
+    { "id": "collector", "lane": "obs", "col": 5, "type": "cloud", "label": "OTel Collector" }
+  ],
+  "edges": [
+    { "id": "request", "from": "client", "to": "runtime", "label": "chat request", "variant": "emphasis", "role": "main" },
+    { "id": "estimate", "from": "runtime", "to": "admission", "label": "estimate work", "variant": "emphasis", "role": "main" },
+    { "id": "dispatch", "from": "admission", "to": "worker", "label": "admit + select", "variant": "emphasis", "role": "main" },
+    { "id": "return", "from": "worker", "to": "response", "label": "SSE / JSON", "variant": "emphasis", "role": "main" },
+    { "id": "blocked-path", "from": "admission", "to": "blocked", "label": "reject or no route", "variant": "security", "role": "error" },
+    { "id": "retry-path", "from": "worker", "to": "retry", "label": "reselect once", "variant": "security", "role": "error" },
+    { "id": "record", "from": "worker", "to": "event", "label": "timings + outcome", "variant": "dashed", "role": "async" },
+    { "id": "export", "from": "event", "to": "collector", "label": "OTLP if configured", "variant": "dashed", "role": "async" }
+  ],
+  "cards": [
+    { "dot": "rose", "title": "Explicitly unsupported", "items": ["No agent planner, tool router, approval API, or human-consent path was found in the runtime code.", "Approval is shown as an isolated node to document this absence; it is not on the request path."] },
+    { "dot": "amber", "title": "Policy + recovery", "items": ["Admission queues work or rejects overload and oversize estimates with 429 + Retry-After.", "Scheduling rejects no healthy worker or unschedulable placement before dispatch.", "After a connection failure, the gateway may select one different healthy worker; no generalized retry loop was observed."] },
+    { "dot": "cyan", "title": "Evidence inspected", "items": ["apps/gateway/src/main.rs: request, admission, worker selection, one re-route, and response handling.", "apps/gateway/src/admission.rs: overload and work-cap behavior; apps/gateway/src/lifecycle.rs: functional readiness.", "apps/gateway/src/telemetry.rs and observability/otel/collector.yaml: optional OTLP export."] }
+  ]
+}

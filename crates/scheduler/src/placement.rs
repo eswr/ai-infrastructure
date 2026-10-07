@@ -681,7 +681,7 @@ mod tests {
 
     #[test]
     fn resident_model_skips_the_weights_term() {
-        let mut w = gpu("a10-01", "nvidia-a10", 24.0);
+        let w = gpu("a10-01", "nvidia-a10", 24.0);
         w.note_model_loaded("qwen2.5-32b-instruct-q4");
         let fleet = vec![Arc::new(w)];
         // Cold: 32B q4 (~17 GB + overhead) fits a 24 GB A10 barely; with a

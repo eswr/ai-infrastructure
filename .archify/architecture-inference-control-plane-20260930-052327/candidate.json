@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Inference Lab — Runtime Architecture",
+    "subtitle": "Primary OpenAI-compatible inference request path; optional Kubernetes and observability integrations",
+    "locale": "en",
+    "output": ".archify/architecture-inference-control-plane-20260930-052327/inference-control-plane.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "clients",
+      "type": "external",
+      "label": "API Clients & Loadgen",
+      "sublabel": "OpenAI-compatible requests",
+      "pos": [40, 330],
+      "size": [150, 72]
+    },
+    {
+      "id": "gateway",
+      "type": "backend",
+      "label": "Gateway Request Handler",
+      "sublabel": "Axum POST /v1/chat/completions",
+      "pos": [338, 330],
+      "size": [168, 72]
+    },
+    {
+      "id": "estimator",
+      "type": "backend",
+      "label": "Token Estimator",
+      "sublabel": "input + output work estimate",
+      "pos": [618, 190],
+      "size": [154, 68]
+    },
+    {
+      "id": "admission",
+      "type": "security",
+      "label": "Admission Controller",
+      "sublabel": "budget, queue, or 429",
+      "pos": [618, 330],
+      "size": [154, 72]
+    },
+    {
+      "id": "scheduler",
+      "type": "backend",
+      "label": "Scheduler & Router",
+      "sublabel": "health-aware worker selection",
+      "pos": [888, 330],
+      "size": [166, 72]
+    },
+    {
+      "id": "lifecycle",
+      "type": "security",
+      "label": "Worker Lifecycle Gate",
+      "sublabel": "functional readiness + draining",
+      "pos": [888, 175],
+      "size": [166, 70]
+    },
+    {
+      "id": "workers",
+      "type": "external",
+      "label": "Model Worker Pool",
+      "sublabel": "MLX-LM, llama.cpp, vLLM-Metal, mock",
+      "pos": [1198, 330],
+      "size": [182, 76]
+    },
+    {
+      "id": "streaming",
+      "type": "backend",
+      "label": "Instrumented Streaming Proxy",
+      "sublabel": "SSE, TTFT, usage, cancellation",
+      "pos": [1198, 510],
+      "size": [182, 72]
+    },
+    {
+      "id": "kubernetes",
+      "type": "cloud",
+      "label": "Kubernetes Discovery",
+      "sublabel": "pods + endpoints; optional mode",
+      "pos": [1198, 155],
+      "size": [182, 68]
+    },
+    {
+      "id": "observability",
+      "type": "cloud",
+      "label": "Observability Stack",
+      "sublabel": "OTel Collector → Tempo, Loki, Prometheus, Grafana",
+      "pos": [888, 650],
+      "size": [200, 72]
+    }
+  ],
+  "boundaries": [
+    { "kind": "security-group", "label": "Gateway trust boundary — request policy and worker selection", "wraps": ["gateway", "estimator", "admission", "scheduler", "lifecycle", "streaming"], "pad": 28 },
+    { "kind": "region", "label": "Optional Kubernetes control-plane boundary", "wraps": ["kubernetes"], "pad": 24 }
+  ],
+  "connections": [
+    { "id": "client-request", "from": "clients", "to": "gateway", "label": "POST /v1/chat/completions", "variant": "emphasis", "route": "straight" },
+    { "id": "request-estimate", "from": "gateway", "to": "estimator", "label": "estimate tokens", "variant": "emphasis", "fromSide": "right", "toSide": "left", "route": "auto" },
+    { "id": "estimate-admission", "from": "estimator", "to": "admission", "label": "estimated work", "variant": "emphasis", "route": "straight" },
+    { "id": "admission-schedule", "from": "admission", "to": "scheduler", "label": "admit or dequeue", "variant": "emphasis", "route": "straight" },
+    { "id": "lifecycle-gate", "from": "lifecycle", "to": "scheduler", "label": "routable workers", "variant": "security", "route": "straight" },
+    { "id": "schedule-worker", "from": "scheduler", "to": "workers", "label": "reserve + proxy request", "variant": "emphasis", "route": "straight" },
+    { "id": "worker-stream", "from": "workers", "to": "streaming", "label": "OpenAI response / SSE", "variant": "emphasis", "route": "straight" },
+    { "id": "stream-response", "from": "streaming", "to": "clients", "label": "stream response", "variant": "emphasis", "fromSide": "left", "toSide": "bottom", "route": "auto" },
+    { "id": "k8s-registers", "from": "kubernetes", "to": "lifecycle", "label": "worker membership", "variant": "dashed", "route": "auto" },
+    { "id": "telemetry-export", "from": "streaming", "to": "observability", "label": "OTLP", "variant": "dashed", "route": "auto" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Primary path",
+      "items": [
+        "The handler estimates work, then the admission controller either admits, queues, or returns 429 with Retry-After.",
+        "The scheduler atomically reserves estimated work before it proxies an OpenAI-compatible request to one healthy worker.",
+        "The streaming proxy forwards bytes while measuring first-token latency, inter-token gaps, usage, and cancellation."
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Worker ownership & deployment",
+      "items": [
+        "Workers may be native macOS model servers or Kubernetes-discovered worker pods; both remain upstream of the gateway.",
+        "A worker is traffic-eligible only after transport and functional-generation checks; drain state removes it from routing.",
+        "Kubernetes discovery is enabled only when WORKER_DISCOVERY=kubernetes; static and external workers remain supported."
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Telemetry dependency",
+      "items": [
+        "The gateway exports OpenTelemetry signals to the collector, which fans traces to Tempo, logs to Loki, and metrics to Prometheus.",
+        "Prometheus also scrapes the gateway directly; Grafana is provisioned against the observability services."
+      ]
+    }
+  ]
+}

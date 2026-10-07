@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Gateway Chat Completion Request",
+    "subtitle": "Verified request path; authentication and request-persistence fallback are explicitly absent from this repository.",
+    "locale": "en",
+    "output": ".archify/sequence-gateway-request-20260930-054936/gateway-request.html",
+    "viewBox": [1080, 690],
+    "column_fit": "spread",
+    "quality_profile": "showcase"
+  },
+  "participants": [
+    { "id": "caller", "type": "external", "label": "Caller", "sublabel": "client or loadgen" },
+    { "id": "gateway", "type": "backend", "label": "Gateway", "sublabel": "Axum handler" },
+    { "id": "auth", "type": "security", "label": "Authentication", "sublabel": "not implemented" },
+    { "id": "scheduler", "type": "backend", "label": "Scheduler", "sublabel": "select + reserve" },
+    { "id": "cache", "type": "database", "label": "Slot Cache View", "sublabel": "reuse estimate" },
+    { "id": "worker", "type": "external", "label": "Model Worker", "sublabel": "OpenAI upstream" },
+    { "id": "persistence", "type": "database", "label": "Request Store", "sublabel": "not implemented" },
+    { "id": "otel", "type": "cloud", "label": "OTel Collector", "sublabel": "async export" }
+  ],
+  "segments": [
+    { "from": 150, "to": 190, "label": "Ingress" },
+    { "from": 195, "to": 275, "label": "Route" },
+    { "from": 280, "to": 385, "label": "Execute" },
+    { "from": 390, "to": 490, "label": "Return + evidence" }
+  ],
+  "messages": [
+    { "id": "request", "from": "caller", "to": "gateway", "y": 165, "label": "POST /v1/chat/completions", "variant": "emphasis", "note": "No authentication middleware or credential validation was found on this route." },
+    { "id": "estimate", "from": "gateway", "to": "scheduler", "y": 205, "label": "estimate + select", "variant": "emphasis" },
+    { "id": "cache-view", "from": "scheduler", "to": "cache", "y": 240, "label": "lookup prefix", "variant": "default", "note": "The scheduler consults in-memory slot cache knowledge when using slot policies." },
+    { "id": "cache-outcome", "from": "cache", "to": "scheduler", "y": 270, "label": "hit: reuse / miss: 0", "variant": "return" },
+    { "id": "dispatch", "from": "scheduler", "to": "worker", "y": 310, "label": "reserve + POST", "variant": "emphasis", "note": "For slot workers, the gateway injects id_slot and cache_prompt; it also injects W3C traceparent." },
+    { "id": "upstream-return", "from": "worker", "to": "gateway", "y": 360, "label": "SSE or JSON", "variant": "return", "note": "The gateway preserves the upstream response type and treats non-SSE responses honestly." },
+    { "id": "client-return", "from": "gateway", "to": "caller", "y": 410, "label": "forward response", "variant": "return" },
+    { "id": "trace", "from": "gateway", "to": "otel", "y": 470, "label": "export OTLP", "variant": "dashed", "note": "Traces and logs export only when OTEL_EXPORTER_OTLP_ENDPOINT is configured." }
+  ],
+  "activations": [
+    { "participant": "gateway", "from": 165, "to": 420, "type": "backend" },
+    { "participant": "scheduler", "from": 200, "to": 320, "type": "backend" },
+    { "participant": "cache", "from": 235, "to": 275, "type": "database" },
+    { "participant": "worker", "from": 305, "to": 368, "type": "external" },
+    { "participant": "otel", "from": 465, "to": 495, "type": "cloud" }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "Explicit absences",
+      "items": [
+        "No authentication or authorization middleware was found on the chat-completions route.",
+        "No request database, durable request state, or request-persistence fallback was found in the request path.",
+        "The diagram includes those participants only to make their non-implementation unambiguous; they receive no messages."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Cache semantics",
+      "items": [
+        "This is scheduler-maintained slot cache knowledge, not a separate Redis-like request cache.",
+        "A slot policy records dispatches and prices reusable prefix tokens; a miss is represented as zero reusable tokens.",
+        "There is no cache-to-persistence fallback in the observed code."
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Evidence inspected",
+      "items": [
+        "apps/gateway/src/main.rs: request handler, scheduler selection, upstream POST, SSE/JSON response handling, and traceparent injection.",
+        "crates/scheduler/src/lib.rs: slot cache view, reusable-token pricing, and dispatch recording.",
+        "apps/gateway/src/telemetry.rs: OTLP is optional and exports traces/logs through configured providers."
+      ]
+    }
+  ]
+}

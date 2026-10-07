@@ -248,7 +248,7 @@ def read_records(out_dir: Path, name: str) -> tuple[dict, list[dict]]:
     return data.get("summary", {}), data.get("records", [])
 
 
-def percentile(values: list[float], q: float) -> float | None:
+def percentile(values: list[float | None], q: float) -> float | None:
     if not values:
         return None
     xs = sorted(v for v in values if v is not None)
@@ -268,9 +268,9 @@ def calibration_status() -> dict | None:
         return None
 
 
-def start_gateway(gateway_bin: Path, log_path: Path, model: str, port: int,
+def start_gateway(gateway_bin: Path, log_file, model: str, port: int,
                   cal_dir: str):
-    gw = subprocess.Popen([str(gateway_bin)], stdout=log_path,
+    gw = subprocess.Popen([str(gateway_bin)], stdout=log_file,
                           stderr=subprocess.STDOUT,
                           env={**os.environ, **gateway_env(model, port, cal_dir)},
                           cwd=REPO, start_new_session=True)
@@ -314,16 +314,18 @@ def prefill_contention_phase(loadgen_bin: Path, wave_dir: Path, model: str,
                               phase_dir, phase_dir / f"{name}.log")
             wall = round(time.time() - t0, 1)
             summary, records = read_records(phase_dir, name)
-            ttfts = [x.get("ttft_ms") for x in records if x.get("ok")]
+            ttfts = [ttft for x in records if x.get("ok")
+                     and (ttft := x.get("ttft_ms")) is not None]
             per_tok = [x["ttft_ms"] / (pf_tokens + UNIQUE_TOKENS)
                        for x in records if x.get("ok") and x.get("ttft_ms")]
             agg_tok_s = None
             if ttfts:
                 agg_tok_s = level * (pf_tokens + UNIQUE_TOKENS) / max(ttfts) * 1000.0
+            ttft_p50 = percentile(ttfts, 0.5)
             rows.append({
                 "level": level, "round": r, "seed": seed, "wall_s": wall,
                 "exit": rec["exit"], "ok": len(ttfts), "total": level,
-                "ttft_p50_s": round(percentile(ttfts, 0.5) / 1000.0, 2) if ttfts else None,
+                "ttft_p50_s": round(ttft_p50 / 1000.0, 2) if ttft_p50 is not None else None,
                 "ttft_max_s": round(max(ttfts) / 1000.0, 2) if ttfts else None,
                 "prefill_ms_per_tok_mean": round(sum(per_tok) / len(per_tok), 3) if per_tok else None,
                 "aggregate_prefill_tok_s": round(agg_tok_s, 1) if agg_tok_s else None,
@@ -362,13 +364,14 @@ def decode_scaling_phase(loadgen_bin: Path, wave_dir: Path, model: str,
                 decode_ms_tok.append((x["e2e_ms"] - x["ttft_ms"]) / toks)
                 if x.get("max_inter_token_gap_ms") is not None:
                     stalls.append(x["max_inter_token_gap_ms"])
+            dec_p50 = percentile(decode_ms_tok, 0.5)
             rows.append({
                 "level": level, "round": r, "seed": seed,
                 "exit": rec["exit"],
                 "decode_ms_per_tok_mean": round(sum(decode_ms_tok) / len(decode_ms_tok), 1)
                 if decode_ms_tok else None,
-                "decode_ms_per_tok_p50": round(percentile(decode_ms_tok, 0.5), 1)
-                if decode_ms_tok else None,
+                "decode_ms_per_tok_p50": round(dec_p50, 1)
+                if dec_p50 is not None else None,
                 "max_stall_s": round(max(stalls) / 1000.0, 2) if stalls else None,
             })
             log(f"  decode L={level} r={r}: {rows[-1]['decode_ms_per_tok_mean']} ms/tok")
@@ -413,7 +416,9 @@ def decode_interference_phase(loadgen_bin: Path, wave_dir: Path, model: str,
         _, a_records = read_records(phase_dir, a_name)
         _, b_records = read_records(phase_dir, b_name)
         a_rec = next((x for x in a_records if x.get("ok")), {})
-        b_ttfts = [x.get("ttft_ms") for x in b_records if x.get("ok") and x.get("ttft_ms")]
+        b_ttfts = [ttft for x in b_records if x.get("ok")
+                   and (ttft := x.get("ttft_ms")) is not None]
+        inj_p50 = percentile(b_ttfts, 0.5)
         rows.append({
             "level": level, "interactive_exit": a_exit,
             "inject_exit": b["exit"], "inject_wall_s": inject_wall,
@@ -424,8 +429,8 @@ def decode_interference_phase(loadgen_bin: Path, wave_dir: Path, model: str,
             if a_rec.get("max_inter_token_gap_ms") is not None else None,
             "interactive_ttft_s": round(a_rec["ttft_ms"] / 1000.0, 2)
             if a_rec.get("ttft_ms") else None,
-            "injected_ttft_p50_s": round(percentile(b_ttfts, 0.5) / 1000.0, 2)
-            if b_ttfts else None,
+            "injected_ttft_p50_s": round(inj_p50 / 1000.0, 2)
+            if inj_p50 is not None else None,
         })
         log(f"  interference L={level}: itl p95={rows[-1]['itl_p95_ms']}ms "
             f"max stall={rows[-1]['max_stall_s']}s")

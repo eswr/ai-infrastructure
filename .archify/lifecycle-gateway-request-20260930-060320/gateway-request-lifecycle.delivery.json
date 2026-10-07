@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "fb096a75-7ab0-4e4b-9a1f-25241b01daa7",
+  "status": "current",
+  "command": "deliver",
+  "type": "lifecycle",
+  "input": "/Users/eswr/code/ai-infrastructure/.archify/lifecycle-gateway-request-20260930-060320/candidate.json",
+  "output": "/Users/eswr/code/ai-infrastructure/.archify/lifecycle-gateway-request-20260930-060320/gateway-request-lifecycle.html",
+  "specification": {
+    "sha256": "606f470376e98a1bd49f19f0bcb84750b853af7e8869fdac2748969f84e2de48",
+    "bytes": 5465
+  },
+  "artifact": {
+    "sha256": "fb1fa09ba1eb21f90ca3be61c8b728ac3cf8be26a616546d7476ecfa2c0baa77",
+    "bytes": 776476
+  }
+}

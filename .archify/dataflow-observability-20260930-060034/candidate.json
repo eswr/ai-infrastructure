@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "Observed Telemetry Data Flow",
+    "subtitle": "OTLP fan-out and Prometheus scraping; no event broker, topic, consumer group, replay path, or DLQ is implemented.",
+    "locale": "en",
+    "output": ".archify/dataflow-observability-20260930-060034/observability-dataflow.html",
+    "viewBox": [1080, 560],
+    "quality_profile": "showcase"
+  },
+  "stages": [
+    { "label": "Producers" },
+    { "label": "Ingest" },
+    { "label": "Process" },
+    { "label": "State stores" },
+    { "label": "Consumers" }
+  ],
+  "nodes": [
+    { "id": "gateway", "type": "backend", "label": "Gateway", "sublabel": "traces, logs, metrics", "tag": "producer", "stage": 0, "row": 0 },
+    { "id": "loadgen", "type": "external", "label": "Loadgen", "sublabel": "OTLP-capable producer", "stage": 0, "row": 2 },
+    { "id": "collector", "type": "cloud", "label": "OTel Collector", "sublabel": "OTLP gRPC / HTTP", "stage": 1, "row": 1 },
+    { "id": "batch", "type": "backend", "label": "Batch Processor", "sublabel": "collector batch stage", "stage": 2, "row": 1 },
+    { "id": "tempo", "type": "database", "label": "Tempo", "sublabel": "trace store", "stage": 3, "row": 0 },
+    { "id": "loki", "type": "database", "label": "Loki", "sublabel": "log store", "stage": 3, "row": 1 },
+    { "id": "prometheus", "type": "database", "label": "Prometheus", "sublabel": "metrics store", "stage": 3, "row": 2 },
+    { "id": "grafana", "type": "frontend", "label": "Grafana", "sublabel": "dashboards", "stage": 4, "row": 1 }
+  ],
+  "flows": [
+    { "id": "gateway-otlp", "from": "gateway", "to": "collector", "label": "OTLP signals", "classification": "optional export", "variant": "emphasis" },
+    { "id": "loadgen-otlp", "from": "loadgen", "to": "collector", "label": "OTLP signals", "classification": "optional export", "variant": "dashed" },
+    { "id": "batch-process", "from": "collector", "to": "batch", "label": "batch", "classification": "collector processor", "variant": "default", "labelDy": -34 },
+    { "id": "traces", "from": "batch", "to": "tempo", "label": "traces", "classification": "OTLP HTTP", "variant": "emphasis", "labelDy": -60 },
+    { "id": "logs", "from": "batch", "to": "loki", "label": "logs", "classification": "OTLP HTTP", "variant": "emphasis", "labelAt": [570, 315] },
+    { "id": "metrics", "from": "batch", "to": "prometheus", "label": "metrics", "classification": "Prometheus endpoint", "variant": "emphasis", "labelDy": 70 },
+    { "id": "tempo-query", "from": "tempo", "to": "grafana", "label": "traces", "classification": "dashboard query", "variant": "default", "labelDy": -60 },
+    { "id": "loki-query", "from": "loki", "to": "grafana", "label": "logs", "classification": "dashboard query", "variant": "default", "labelAt": [765, 315] },
+    { "id": "metrics-query", "from": "prometheus", "to": "grafana", "label": "metrics", "classification": "dashboard query", "variant": "default", "labelDy": 70 }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Actual producers, events, and processing",
+      "items": [
+        "Gateway exports traces and logs through OTLP only when OTEL_EXPORTER_OTLP_ENDPOINT is configured; it also exposes a Prometheus /metrics endpoint.",
+        "The collector receives OTLP and uses a batch processor before separate traces, logs, and metrics pipelines fan out.",
+        "Prometheus independently pulls the gateway metrics endpoint; this is a pull scrape, not a consumer group."
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "State stores and consumers",
+      "items": [
+        "Tempo, Loki, and Prometheus are the observed durable observability stores, configured by the local Compose stack.",
+        "Grafana is the observed dashboard consumer; the repository does not assert ordering or delivery guarantees for these flows."
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Not implemented — intentionally omitted from topology",
+      "items": [
+        "No Kafka/NATS/RabbitMQ/SQS-style broker, named topic, partition ordering, consumer group, replay operation, or dead-letter queue was found.",
+        "No event ownership contract or at-least-once/exactly-once delivery semantics are declared by the inspected code and configuration.",
+        "Therefore this diagram does not fabricate topics, replay paths, consumer groups, or a DLQ."
+      ]
+    }
+  ]
+}

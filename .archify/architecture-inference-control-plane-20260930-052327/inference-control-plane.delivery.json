@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "51f3b2ad-e8c5-4f1c-a613-a983ffdc6ae1",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/Users/eswr/code/ai-infrastructure/.archify/architecture-inference-control-plane-20260930-052327/candidate.json",
+  "output": "/Users/eswr/code/ai-infrastructure/.archify/architecture-inference-control-plane-20260930-052327/inference-control-plane.html",
+  "specification": {
+    "sha256": "7971359bc614d5f3fa19a4c737a73816566da1741acc31d94b6d961f18169795",
+    "bytes": 5709
+  },
+  "artifact": {
+    "sha256": "eb9bcdb29a2869c4914130572dee8e7213913f3d8bf72426ee64415d27d9a54a",
+    "bytes": 765766
+  }
+}
